@@ -17,10 +17,18 @@ class BertDataset(torch.utils.data.Dataset):
     Return [CLS] :code:`sentence_a` [SEP] :code:`sentence_b` [SEP]
     and :code:`next_sent` if next sentence is :code:`sentence_b`
 
+    Args:
+        location: Path to dataset
+        shuffle: Shuffle the dataset after loading
+        in_memory: Load the entire dataset in memory
+
+    :code:`in_memory` doesn't seem to lead to any significant speedup and can be avoided
+    though it can be tested individually
+
     """
 
-    def __init__(self, location, shuffle=True):
-        self.data = datasets.load_from_disk(location)
+    def __init__(self, location, shuffle=True, in_memory=False):
+        self.data = datasets.load_from_disk(location, keep_in_memory=in_memory)
         self.inds = np.arange(len(self.data))
         if shuffle:
             print("Shuffling dataset")
@@ -188,7 +196,6 @@ def _to_encoded_inputs(batch, tokenizer, sequence_length_alignment=8,
     return encoded_inputs
 
 
-
 def collator_alt(batch, seq_align_len, tokenizer):
     output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
                                 "masked_lm_labels", "next_sentence_label"]}
@@ -238,3 +245,22 @@ def collator(batch, seq_align_len, tokenizer):
         output["token_type_id"] = token_type_id_tensor
         output["next_sentence_label"] = torch.as_tensor(next_sentence_labels)
     return output
+
+
+# Tests
+# data = BertDataset("books-wiki-tokenized", False)
+# from transformers import AutoTokenizer
+# tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
+# batch_size = 32
+# inds = np.arange(len(data))
+# batch_inds = np.random.choice(inds, batch_size)
+# batch = [data[i] for i in batch_inds]
+# collated = collator(batch, 8, tokenizer)
+
+# from functools import partial
+# collate_fn = collator(seq_align_len=8, tokenizer=tokenizer)
+# loader = torch.utils.data.DataLoader(train_data, shuffle=False,
+#                                      num_workers=32, drop_last=False,
+#                                      pin_memory=True, batch_size=512,
+#                                      collate_fn=collate_fn)
+# batch = loader.__iter__().__next__()
