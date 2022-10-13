@@ -3,6 +3,59 @@ import io
 import torch
 import numpy as np
 
+import datasets
+
+
+# TODO: Add seed for numpy maybe
+class BertDataset(torch.utils.data.Dataset):
+    """Return a sentence pair from the dataset
+
+    Pick two sentences :code:`sentence_a`, and :code:`sentence_b` from data
+
+    50% of the time :code:`sentence_b` is next sentence, rest random
+
+    Return [CLS] :code:`sentence_a` [SEP] :code:`sentence_b` [SEP]
+    and :code:`next_sent` if next sentence is :code:`sentence_b`
+
+    """
+
+    def __init__(self, location, shuffle=True):
+        self.data = datasets.load_from_disk(location)
+        self.inds = np.arange(len(self.data))
+        if shuffle:
+            print("Shuffling dataset")
+            np.random.shuffle(self.inds)
+
+    def reset(self):
+        np.random.shuffle(self.inds)
+
+    def __getitem__(self, i):
+        output = {x: None for x in
+                  ["input_ids", "token_type_ids",
+                   "attention_mask", "special_tokens_mask",
+                   "next_sentence_label"]}
+        if np.random.choice([0, 1]):
+            sent_a, sent_b, next_sent =\
+                self.data[int(self.inds[i])], self.data[int(self.inds[i+1])], 1
+        else:
+            sent_a, sent_b, next_sent =\
+                self.data[int(self.inds[i])], self.data[int(np.random.choice(self.inds))], 0
+        output["input_ids"] = torch.as_tensor([*sent_a['input_ids'], *sent_b['input_ids'][1:]],
+                                              dtype=torch.long)
+        output["token_type_ids"] = torch.as_tensor([*sent_a['token_type_ids'],
+                                                    *[1 for _ in sent_b['token_type_ids'][1:]]],
+                                                   dtype=torch.long)
+        output["attention_mask"] = torch.ones(len(sent_a['input_ids']) + len(sent_b['input_ids']) - 1,
+                                              dtype=torch.long)
+        output["special_tokens_mask"] = torch.as_tensor([*sent_a['special_tokens_mask'],
+                                                         *sent_b['special_tokens_mask'][1:]],
+                                                        dtype=torch.long)
+        output["next_sentence_label"] = next_sent
+        return output
+
+    def __len__(self):
+        return len(self.data)
+
 
 def serialize_np_array(a):
     memfile = io.BytesIO()
@@ -20,9 +73,9 @@ def deserialize_np_array(b):
 
 def _mask_tokens(inputs, special_tokens_mask=None, tokenizer=None,
                  mlm_probability=0.15, ignore_index=-1):
-    """
-    Prepare masked tokens inputs/labels for masked language modeling: 80% MASK,
-    10% random, 10% original.
+    """Prepare masked tokens inputs/labels for masked language modeling
+    80% MASK, 10% random, 10% original.
+
     """
     labels = inputs.clone()
     # We sample a few tokens in each sequence for MLM training (with probability
@@ -64,9 +117,11 @@ def _to_encoded_inputs(batch, tokenizer, sequence_length_alignment=8,
                        ignore_index=-1):
     batch_size = len(batch)
     As, Bs, are_random_next = [], [], []
-    static_masking = (len(batch[0]) > 3)
+    # static_masking = (len(batch[0]) > 3)
+    static_masking = (len(batch.keys()) > 3)
     if static_masking:
-        assert len(batch[0]) == 5
+        # assert len(batch[0]) == 5
+        assert len(batch.keys()) == 5
         all_masked_lm_positions, all_masked_lm_labels = [], []
     # Unpack each field.
     for sample in batch:
@@ -131,3 +186,55 @@ def _to_encoded_inputs(batch, tokenizer, sequence_length_alignment=8,
     else:
         encoded_inputs['special_tokens_mask'] = special_tokens_mask
     return encoded_inputs
+
+
+
+def collator_alt(batch, seq_align_len, tokenizer):
+    output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
+                                "masked_lm_labels", "next_sentence_label"]}
+    with torch.no_grad():
+        inputs = batch['input_ids']
+        batch_size = len(inputs)
+        lengths = [*map(len, inputs)]
+        max_len = max(lengths)
+        width = int(np.ceil(max_len / seq_align_len) * seq_align_len)
+        size = (batch_size, width)
+        input_tensor = torch.zeros(size, dtype=torch.long)
+        mask_tensor = torch.zeros(size, dtype=torch.long)
+        for i, x in enumerate(inputs):
+            input_tensor[i, :lengths[i]] = torch.tensor(x)
+            # CHECK: Do we mask out CLS, SEP?
+            mask_tensor[i, :lengths[i]] = 1
+        output["input_ids"], output["masked_lm_labels"] = _mask_tokens(input_tensor, tokenizer=tokenizer)
+        output["attention_mask"] = mask_tensor
+    return output
+
+
+def collator(batch, seq_align_len, tokenizer):
+    output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
+                                "masked_lm_labels", "next_sentence_label"]}
+    lengths = [len(x['input_ids']) for x in batch]
+    batch_size = len(batch)
+    max_len = max(lengths)
+    width = int(np.ceil(max_len / seq_align_len) * seq_align_len)
+    size = (batch_size, width)
+    input_tensor = torch.zeros(size, dtype=torch.long)
+    mask_tensor = torch.zeros(size, dtype=torch.long)
+    special_tokens_mask_tensor = torch.zeros(size, dtype=torch.long)
+    token_type_id_tensor = torch.zeros(size, dtype=torch.long)
+    next_sentence_labels = []
+    with torch.no_grad():
+        for i, x in enumerate(batch):
+            input_tensor[i, :lengths[i]] = x['input_ids']
+            # CHECK: Do we mask out CLS, SEP?
+            mask_tensor[i, :lengths[i]] = x['attention_mask']
+            special_tokens_mask_tensor[i, :lengths[i]] = x['special_tokens_mask']
+            token_type_id_tensor[i, :lengths[i]] = x['special_tokens_mask']
+            next_sentence_labels.append(x['next_sentence_label'])
+        output["input_ids"], output["masked_lm_labels"] = _mask_tokens(
+            input_tensor, tokenizer=tokenizer,
+            special_tokens_mask=special_tokens_mask_tensor)
+        output["attention_mask"] = mask_tensor
+        output["token_type_id"] = token_type_id_tensor
+        output["next_sentence_label"] = torch.as_tensor(next_sentence_labels)
+    return output
