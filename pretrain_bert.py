@@ -6,6 +6,7 @@ import args as Args
 import modeling
 from schedulers import PolyWarmUpScheduler
 from lamb_amp_opt.fused_lamb import FusedLAMBAMP
+import dataprep
 
 
 class BertPretrainingCriterion(torch.nn.Module):
@@ -45,6 +46,7 @@ def main():
     sequence_output_is_dense = args.sequence_output_is_dense
     model, config = get_model_and_config(args.config_file, sequence_output_is_dense)
 
+    data = dataprep.load_saved_data()
     # If allreduce_post_accumulation_fp16 is not set, Native AMP Autocast is
     # used along with FP32 gradient accumulation and all-reduce
     if args.fp16 and args.allreduce_post_accumulation_fp16:

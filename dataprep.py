@@ -31,23 +31,32 @@ def load_saved_tokenizer(tokenizer_id="bert-base-uncased-custom"):
 
 # tokenizer = load_saved_tokenizer()
 # train_data = load_data()
-def preprocess_data(train_data, tokenizer, num_proc=8):
-    # preprocess dataset function
+def preprocess_data(train_data, tokenizer, num_proc=64, remove_text=True):
     def group_texts(tokenizer, examples):
         return tokenizer(examples["text"], return_special_tokens_mask=True,
                          truncation=True, max_length=tokenizer.model_max_length)
     from functools import partial
     preproc_func = partial(group_texts, tokenizer)
-    tokenized_dataset = train_data.map(preproc_func, batched=True,
-                                       remove_columns=["text"], num_proc=num_proc,
-                                       keep_in_memory=True)
+    if remove_text:
+        tokenized_dataset = train_data.map(preproc_func, batched=True,
+                                           remove_columns=["text"], num_proc=num_proc,
+                                           keep_in_memory=True)
+    else:
+        tokenized_dataset = train_data.map(preproc_func, batched=True,
+                                           num_proc=num_proc, keep_in_memory=True)
     return tokenized_dataset
 
 
-def save_data(dataset, seed=1122):
-    dataset.shuffle(seed=seed)
-    dataset.save_to_disk("./books-wiki-tokenized-shuffled")
+def save_data(dataset, seed=1122, path="./books-wiki-tokenized"):
+    dataset.save_to_disk(path)
 
 
-def load_saved_data():
-    return load_from_disk("./books-wiki-tokenized-shuffled")
+def load_saved_data(path="./books-wiki-tokenized"):
+    return load_from_disk(path)
+
+
+def build_wiki_books():
+    data = load_data()
+    tokenizer = load_saved_tokenizer("bert-base-uncased-whole")
+    processed_data = preprocess_data(data, tokenizer, remove_text=False)
+    save_data(processed_data)
