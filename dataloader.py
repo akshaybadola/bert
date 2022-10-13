@@ -236,19 +236,21 @@ def collator(batch, seq_align_len, tokenizer):
             # CHECK: Do we mask out CLS, SEP?
             mask_tensor[i, :lengths[i]] = x['attention_mask']
             special_tokens_mask_tensor[i, :lengths[i]] = x['special_tokens_mask']
-            token_type_id_tensor[i, :lengths[i]] = x['special_tokens_mask']
+            token_type_id_tensor[i, :lengths[i]] = x['token_type_ids']
             next_sentence_labels.append(x['next_sentence_label'])
         output["input_ids"], output["masked_lm_labels"] = _mask_tokens(
             input_tensor, tokenizer=tokenizer,
             special_tokens_mask=special_tokens_mask_tensor)
         output["attention_mask"] = mask_tensor
-        output["token_type_id"] = token_type_id_tensor
-        output["next_sentence_label"] = torch.as_tensor(next_sentence_labels)
+        output["token_type_ids"] = token_type_id_tensor
+        output["next_sentence_labels"] = torch.as_tensor(next_sentence_labels)
     return output
 
 
 # Tests
-# data = BertDataset("books-wiki-tokenized", False)
+# import torch
+# import dataloader
+# data = dataloader.BertDataset("books-wiki-tokenized", False)
 # from transformers import AutoTokenizer
 # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
 # batch_size = 32
@@ -258,8 +260,8 @@ def collator(batch, seq_align_len, tokenizer):
 # collated = collator(batch, 8, tokenizer)
 
 # from functools import partial
-# collate_fn = collator(seq_align_len=8, tokenizer=tokenizer)
-# loader = torch.utils.data.DataLoader(train_data, shuffle=False,
+# collate_fn = partial(dataloader.collator, seq_align_len=8, tokenizer=tokenizer)
+# loader = torch.utils.data.DataLoader(data, shuffle=False,
 #                                      num_workers=32, drop_last=False,
 #                                      pin_memory=True, batch_size=512,
 #                                      collate_fn=collate_fn)
