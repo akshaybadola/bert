@@ -23,15 +23,24 @@ class BertDataset(torch.utils.data.Dataset):
         location: Path to dataset
         shuffle: Shuffle the dataset after loading
         in_memory: Load the entire dataset in memory
-
+        max_seq_len: Maximum length of the training example
+        min_seq_len: Minimum length of the training example. Only
+                     used with :code:`truncate_second` truncate_strategy
+        truncate_stragety: The strategy to use if the training example > max_seq_len
+                           one of :code:`proportional` or :code:`truncate_second`
     :code:`in_memory` doesn't seem to lead to any significant speedup and can be avoided
     though it can be tested individually
 
     """
 
-    def __init__(self, location, shuffle=True, in_memory=False):
+    def __init__(self, location, shuffle=True, in_memory=False,
+                 max_seq_len=512, min_seq_len=None,
+                 truncate_strategy="proportional"):
         self.data = datasets.load_from_disk(location, keep_in_memory=in_memory)
         self.inds = np.arange(len(self.data))
+        self.truncate_strategy = truncate_strategy
+        self.max_seq_len = max_seq_len
+        self.min_seq_len = min_seq_len
         if shuffle:
             print("Shuffling dataset")
             np.random.shuffle(self.inds)
@@ -52,15 +61,29 @@ class BertDataset(torch.utils.data.Dataset):
                 self.data[int(self.inds[i])], self.data[int(np.random.choice(self.inds))], 0
         len_a = len(sent_a['input_ids'])
         len_b = len(sent_b['input_ids'])
-        # Since the sentences in the dataset are truncated to 512, if we
+        # Since the max sentence length in the dataset is 512, if we
         # concatenate two sentences it becomes > 512. In that case, reduce
-        # the lengths of each proportionally
-        if len_a + len_b > 512:
-            limit_a = int(512 * len_a / (len_a+len_b))+1
-            limit_b = int(512 * len_b / (len_a+len_b))
+        # the lengths according to a strategy
+        max_len = 512
+        if len_a + len_b - 1 > max_len:
+            if self.truncate_strategy == "proportional":
+                limit_a = int(max_len * len_a / (len_a+len_b))+1
+                limit_b = int(max_len * len_b / (len_a+len_b))
+            elif self.truncate_strategy == "truncate_second":
+                min_len_b = self.min_seq_len
+                max_len_a = max_len - min_len_b
+                if len_a > max_len_a:
+                    limit_a = max_len_a
+                    limit_b = len_b if len_b < min_len_b else min_len_b
+                else:
+                    limit_a = len_a
+                    limit_b = max_len - len_a
+            else:
+                raise ValueError(f"Unknown truncate strategy {self.truncate_strategy}")
         else:
             limit_a = len_a
             limit_b = len_b
+
         sep = sent_a['input_ids'][-1]
         output["input_ids"] = torch.as_tensor([*sent_a['input_ids'][:limit_a-1], sep,
                                                *sent_b['input_ids'][1:limit_b-1], sep],
@@ -233,7 +256,17 @@ def collator_alt(batch, seq_align_len, tokenizer):
     return output
 
 
-def collator(batch, seq_align_len, tokenizer, pad_full=False):
+def mlm_collator(batch, seq_align_len, tokenizer, pad_full=False):
+    """Collate for MLM task
+
+    Args:
+        batch: A batch dictionary of instances. Should have 'input_ids'
+        seq_align_len: Align sequences to multiple of this number
+        tokenizer: tokenizer
+        pad_full: pad to maximum seq_len (hard coded to 512)
+
+
+    """
     output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
                                 "masked_lm_labels", "next_sentence_labels"]}
     lengths = [len(x['input_ids']) for x in batch]
@@ -249,7 +282,6 @@ def collator(batch, seq_align_len, tokenizer, pad_full=False):
     with torch.no_grad():
         for i, x in enumerate(batch):
             input_tensor[i, :lengths[i]] = x['input_ids']
-            # CHECK: Do we mask out CLS, SEP?
             mask_tensor[i, :lengths[i]] = x['attention_mask']
             special_tokens_mask_tensor[i, :lengths[i]] = x['special_tokens_mask']
             token_type_id_tensor[i, :lengths[i]] = x['token_type_ids']
@@ -266,7 +298,7 @@ def collator(batch, seq_align_len, tokenizer, pad_full=False):
 
 def get_wiki_books_loader(batch_size, num_workers, seq_align_len):
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
-    collate_fn = partial(collator, seq_align_len, tokenizer=tokenizer)
+    collate_fn = partial(mlm_collator, seq_align_len, tokenizer=tokenizer)
     data = BertDataset("books-wiki-tokenized", True)
     loader = torch.utils.data.DataLoader(data, shuffle=False,
                                          num_workers=num_workers, drop_last=False,
