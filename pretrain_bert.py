@@ -81,28 +81,3 @@ def dict_to(tensors, device):
     return {k: v.to(device) for k, v in tensors.items()}
 
 
-# TESTS
-# import torch
-# import dataloader
-# from functools import partial
-# data = dataloader.BertDataset("books-wiki-tokenized", False)
-# from transformers import AutoTokenizer
-# tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
-# batch_size = 32
-# collate_fn = partial(dataloader.collator, seq_align_len=8, tokenizer=tokenizer)
-# loader = torch.utils.data.DataLoader(data, shuffle=False,
-#                                      num_workers=32, drop_last=False,
-#                                      pin_memory=True, batch_size=512,
-#                                      collate_fn=collate_fn)
-# config_file = "BERT/bert_configs/base.json"
-# model, config = get_model_and_config(config_file, True)
-# model = model.cuda(0)
-iter = loader.__iter__()
-batch = iter.__next__()
-while batch['input_ids'].shape[1] > 512:
-    batch = iter.__next__()
-prediction_scores, seq_relationship_score = model(input_ids=batch['input_ids'].cuda(0),
-                                                  token_type_ids=batch['token_type_ids'].cuda(0),
-                                                  attention_mask=batch['attention_mask'].cuda(0),
-                                                  masked_lm_labels=batch['masked_lm_labels'].cuda(0))
-

@@ -48,15 +48,29 @@ class BertDataset(torch.utils.data.Dataset):
         else:
             sent_a, sent_b, next_sent =\
                 self.data[int(self.inds[i])], self.data[int(np.random.choice(self.inds))], 0
-        output["input_ids"] = torch.as_tensor([*sent_a['input_ids'], *sent_b['input_ids'][1:]],
+        len_a = len(sent_a['input_ids'])
+        len_b = len(sent_b['input_ids'])
+        # Since the sentences in the dataset are truncated to 512, if we
+        # concatenate two sentences it becomes > 512. In that case, reduce
+        # the lengths of each proportionally
+        if len_a + len_b > 512:
+            limit_a = int(512 * len_a / (len_a+len_b))+1
+            limit_b = int(512 * len_b / (len_a+len_b))
+        else:
+            limit_a = len_a
+            limit_b = len_b
+        sep = sent_a['input_ids'][-1]
+        output["input_ids"] = torch.as_tensor([*sent_a['input_ids'][:limit_a-1], sep,
+                                               *sent_b['input_ids'][1:limit_b-1], sep],
                                               dtype=torch.long)
-        output["token_type_ids"] = torch.as_tensor([*sent_a['token_type_ids'],
-                                                    *[1 for _ in sent_b['token_type_ids'][1:]]],
+        output["token_type_ids"] = torch.as_tensor([*sent_a['token_type_ids'][:limit_a],
+                                                    *[1 for _ in sent_b['token_type_ids'][1:limit_b]]],
                                                    dtype=torch.long)
-        output["attention_mask"] = torch.ones(len(sent_a['input_ids']) + len(sent_b['input_ids']) - 1,
+        output["attention_mask"] = torch.ones(len(sent_a['input_ids'][:limit_a])
+                                              + len(sent_b['input_ids'][:limit_b]) - 1,
                                               dtype=torch.long)
-        output["special_tokens_mask"] = torch.as_tensor([*sent_a['special_tokens_mask'],
-                                                         *sent_b['special_tokens_mask'][1:]],
+        output["special_tokens_mask"] = torch.as_tensor([*sent_a['special_tokens_mask'][:limit_a-1], 1,
+                                                         *sent_b['special_tokens_mask'][1:limit_b-1], 1],
                                                         dtype=torch.long)
         output["next_sentence_label"] = next_sent
         return output
@@ -217,13 +231,13 @@ def collator_alt(batch, seq_align_len, tokenizer):
     return output
 
 
-def collator(batch, seq_align_len, tokenizer):
+def collator(batch, seq_align_len, tokenizer, pad_full=False):
     output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
-                                "masked_lm_labels", "next_sentence_label"]}
+                                "masked_lm_labels", "next_sentence_labels"]}
     lengths = [len(x['input_ids']) for x in batch]
     batch_size = len(batch)
     max_len = max(lengths)
-    width = int(np.ceil(max_len / seq_align_len) * seq_align_len)
+    width = 512 if pad_full else int(np.ceil(max_len / seq_align_len) * seq_align_len)
     size = (batch_size, width)
     input_tensor = torch.zeros(size, dtype=torch.long)
     mask_tensor = torch.zeros(size, dtype=torch.long)
@@ -245,24 +259,3 @@ def collator(batch, seq_align_len, tokenizer):
         output["token_type_ids"] = token_type_id_tensor
         output["next_sentence_labels"] = torch.as_tensor(next_sentence_labels)
     return output
-
-
-# Tests
-# import torch
-# import dataloader
-# data = dataloader.BertDataset("books-wiki-tokenized", False)
-# from transformers import AutoTokenizer
-# tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
-# batch_size = 32
-# inds = np.arange(len(data))
-# batch_inds = np.random.choice(inds, batch_size)
-# batch = [data[i] for i in batch_inds]
-# collated = collator(batch, 8, tokenizer)
-
-# from functools import partial
-# collate_fn = partial(dataloader.collator, seq_align_len=8, tokenizer=tokenizer)
-# loader = torch.utils.data.DataLoader(data, shuffle=False,
-#                                      num_workers=32, drop_last=False,
-#                                      pin_memory=True, batch_size=512,
-#                                      collate_fn=collate_fn)
-# batch = loader.__iter__().__next__()
