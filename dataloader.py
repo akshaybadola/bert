@@ -264,10 +264,10 @@ def collator(batch, seq_align_len, tokenizer, pad_full=False):
 
 
 
-def get_wiki_books_loader(batch_size, num_workers, seq_align_len):
+def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True):
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
-    collate_fn = partial(collator, seq_align_len, tokenizer=tokenizer)
-    data = BertDataset("books-wiki-tokenized", True)
+    collate_fn = partial(collator, seq_align_len=seq_align_len, tokenizer=tokenizer)
+    data = BertDataset("books-wiki-tokenized", shuffle=shuffle)
     loader = torch.utils.data.DataLoader(data, shuffle=False,
                                          num_workers=num_workers, drop_last=False,
                                          pin_memory=True, batch_size=batch_size,
