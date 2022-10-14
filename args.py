@@ -47,6 +47,12 @@ def parse_arguments():
                         type=int,
                         default=42,
                         help="random seed for initialization")
+    parser.add_argument("--devices", default="0,1",
+                        help="Comma separated devices. Use -1 for CPU")
+    parser.add_argument('--device_batch_size',
+                        type=int,
+                        default=64,
+                        help="Training batch size per device")
     parser.add_argument('--gradient_accumulation_steps',
                         type=int,
                         default=1,
@@ -102,8 +108,8 @@ def parse_arguments():
 
     # optimizations controlled by command line arguments
     parser.add_argument("--no_dense_sequence_output",
-                        default=False,
-                        action='store_true',
+                        dest="dense_sequence_output",
+                        action='store_false',
                         help="Disable dense sequence output")
     parser.add_argument("--disable_jit_fusions",
                         default=False,

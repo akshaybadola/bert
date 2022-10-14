@@ -1,8 +1,10 @@
 import io
+from functools import partial
 
 import torch
 import numpy as np
 
+from transformers import AutoTokenizer
 import datasets
 
 
@@ -259,3 +261,15 @@ def collator(batch, seq_align_len, tokenizer, pad_full=False):
         output["token_type_ids"] = token_type_id_tensor
         output["next_sentence_labels"] = torch.as_tensor(next_sentence_labels)
     return output
+
+
+
+def get_wiki_books_loader(batch_size, num_workers, seq_align_len):
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
+    collate_fn = partial(collator, seq_align_len, tokenizer=tokenizer)
+    data = BertDataset("books-wiki-tokenized", True)
+    loader = torch.utils.data.DataLoader(data, shuffle=False,
+                                         num_workers=num_workers, drop_last=False,
+                                         pin_memory=True, batch_size=batch_size,
+                                         collate_fn=collate_fn)
+    return loader
