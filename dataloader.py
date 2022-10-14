@@ -64,20 +64,20 @@ class BertDataset(torch.utils.data.Dataset):
         # Since the max sentence length in the dataset is 512, if we
         # concatenate two sentences it becomes > 512. In that case, reduce
         # the lengths according to a strategy
-        max_len = 512
-        if len_a + len_b - 1 > max_len:
+        max_seq_len = self.max_seq_len
+        if len_a + len_b - 1 > max_seq_len:
             if self.truncate_strategy == "proportional":
-                limit_a = int(max_len * len_a / (len_a+len_b))+1
-                limit_b = int(max_len * len_b / (len_a+len_b))
+                limit_a = int(max_seq_len * len_a / (len_a+len_b))+1
+                limit_b = int(max_seq_len * len_b / (len_a+len_b))
             elif self.truncate_strategy == "truncate_second":
                 min_len_b = self.min_seq_len
-                max_len_a = max_len - min_len_b
+                max_len_a = max_seq_len - min_len_b
                 if len_a > max_len_a:
                     limit_a = max_len_a
                     limit_b = len_b if len_b < min_len_b else min_len_b
                 else:
                     limit_a = len_a
-                    limit_b = max_len - len_a
+                    limit_b = max_seq_len - len_a
             else:
                 raise ValueError(f"Unknown truncate strategy {self.truncate_strategy}")
         else:
@@ -255,15 +255,14 @@ def collator_alt(batch, seq_align_len, tokenizer):
     return output
 
 
-def mlm_collator(batch, seq_align_len, tokenizer, pad_full=False):
+def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0):
     """Collate for MLM task
 
     Args:
         batch: A batch dictionary of instances. Should have 'input_ids'
         seq_align_len: Align sequences to multiple of this number
         tokenizer: tokenizer
-        pad_full: pad to maximum seq_len (hard coded to 512)
-
+        pad_full: pad to max_seq_len
 
     """
     output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
@@ -271,7 +270,7 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=False):
     lengths = [len(x['input_ids']) for x in batch]
     batch_size = len(batch)
     max_len = max(lengths)
-    width = 512 if pad_full else int(np.ceil(max_len / seq_align_len) * seq_align_len)
+    width = pad_full if pad_full else int(np.ceil(max_len / seq_align_len) * seq_align_len)
     size = (batch_size, width)
     input_tensor = torch.zeros(size, dtype=torch.long)
     mask_tensor = torch.zeros(size, dtype=torch.long)

@@ -146,7 +146,7 @@ def main():
     if args.devices == "-1":
         devices = [torch.device("cpu")]
     else:
-        devices = [*map(lambda x: torch.device(f"cuda:{devices[x]}"), args.devices.split(","))]
+        devices = [torch.device(f"cuda:{x}") for x in args.devices.split(",")]
     loader_batch_size = device_batch_size * len(devices)
 
     # NOTE: Effective train_batch_size is args.train_batch_size
@@ -154,7 +154,7 @@ def main():
     if args.gradient_accumulation_steps > 1:
         effective_batch_size = loader_batch_size * args.gradient_accumulation_steps
 
-    loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8)
+    loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8, shuffle=False)
     # If allreduce_post_accumulation_fp16 is not set, Native AMP Autocast is
     # used along with FP32 gradient accumulation and all-reduce
     if args.fp16 and args.allreduce_post_accumulation_fp16:
