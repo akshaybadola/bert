@@ -200,7 +200,7 @@ def test_model_adam(tokenizer, model_config):
         return
 
 
-def test_model_dataparallel(tokenizer, model_config):
+def test_model_adam_dataparallel(tokenizer, model_config):
     model, config, criterion = model_config
     with timer:
         data = dataloader.BertDataset("books-wiki-tokenized", False,
@@ -241,3 +241,50 @@ def test_model_dataparallel(tokenizer, model_config):
             print(f"Loop time: {timer.time}")
     except KeyboardInterrupt:
         return
+
+
+def test_model_lamb_dataparallel(tokenizer, model_config):
+    model, config, criterion = model_config
+    with timer:
+        data = dataloader.BertDataset("books-wiki-tokenized", False,
+                                      max_seq_len=128, min_seq_len=30,
+                                      truncate_strategy="truncate_second")
+    batch_size = 512 * 2
+    print(f"batch size is {batch_size}")
+    loader = get_loader(data, tokenizer, batch_size)
+    iter = loader.__iter__()
+    model = model.cuda(0)
+    model.train()
+    model = torch.nn.DataParallel(model, device_ids=[0, 1])
+    model.train()
+
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'gamma', 'beta', 'LayerNorm']
+
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
+
+    optimizer = FusedLAMBAMP(optimizer_grouped_parameters, lr=0.01)
+    optimizer.setup_fp32_params()
+
+    accumulation_steps = 8
+    num_loops = 2
+    total_steps = num_loops * accumulation_steps
+
+    grad_scaler = torch.cuda.amp.GradScaler(init_scale=2.0 ** 20, enabled=True)
+
+    try:
+        for i in range(total_steps):
+            with timer:
+                batch = iter.__next__()
+                batch = {k: v.to(torch.device("cuda:0")) for k, v in batch.items()}
+                take_training_step(batch, grad_scaler, model, criterion, accumulation_steps)
+            print(f"Loop time: {timer.time}")
+            if not (i+1) % accumulation_steps:
+                with timer:
+                    take_optimizer_step(optimizer, grad_scaler)
+                print(f"Optimizer step took time {timer.time}")
+    except KeyboardInterrupt:
+        return
+    

@@ -1,0 +1,11 @@
+{
+    "warmup_steps_phase1": 2000,
+    "train_steps_phase1": 1000000,
+    "warmup_steps_phase2": 500,
+    "train_steps_phase2": 100000,
+    "gradient_accumulation_steps": 8,
+    "learning_rate_phase1": 0.006,
+    "learning_rate_phase2": 0.004,
+    "masking": "static",
+    "fp16": true
+}

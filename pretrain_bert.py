@@ -1,4 +1,7 @@
 from typing import Final
+from types import SimpleNamespace
+import json
+import math
 
 import torch
 
@@ -8,35 +11,38 @@ from schedulers import PolyWarmUpScheduler
 from lamb_amp_opt.fused_lamb import FusedLAMBAMP
 
 from dataloader import get_wiki_books_loader
-from simple_trainer.models import UpdateFunction
+from simple_trainer.helpers import SimpleUpdateFunction
+from simple_trainer.trainer import Trainer
+from simple_trainer import functions
 
 
 def dict_to(tensors, device):
     return {k: v.to(device) for k, v in tensors.items()}
 
 
-class BertUpdateFunction(UpdateFunction):
-    def __init__(self, grad_scaler, lr_scheduler, fp16, all_reduce_fp16):
+class BertUpdateFunction(SimpleUpdateFunction):
+    def __init__(self, grad_scaler, lr_scheduler, grad_accumulation_steps):
         self._train = True
         self._grad_scaler = grad_scaler
         self._lr_scheduler = lr_scheduler
-        self._returns = ["loss", "scaled_loss"]
+        self._grad_accumulation_steps = grad_accumulation_steps
+        self._returns = ["loss", "scaled_loss", "total"]
 
-    @property
-    def train(self):
-        return self._train
+    # Leaky Abstraction alert!
+    # We need to know whether batch_num starts from 0 or 1, LOL
+    # Have worked around it though
+    def is_gradient_accumulation_step(self, batch_num):
+        if batch_num == 0:
+            self._batch_starts_from_zero = True
+        else:
+            self._batch_starts_from_zero = False
+        if self._batch_starts_from_zero:
+            batch_num = batch_num + 1 
+        return not (batch_num % self._grad_accumulation_steps)
 
-    @train.setter
-    def train(self, x: bool):
-        self._train = x
-
-    @property
-    def returns(self):
-        return self._returns
-
-    def __call__(self, batch, criterion, model, optimizer):
+    def __call__(self, batch, criterion, model, optimizer, **kwargs):
         batch = {k: model.to_(v) for k, v in batch.items()}
-        with torch.cuda.amp.autocast(enabled=(self.fp16 and not self.all_reduce_fp16)):
+        with torch.cuda.amp.autocast(enabled=True):
             prediction_scores, seq_relationship_score = model(input_ids=batch['input_ids'],
                                                               token_type_ids=batch['token_type_ids'],
                                                               attention_mask=batch['attention_mask'],
@@ -44,13 +50,22 @@ class BertUpdateFunction(UpdateFunction):
             loss = criterion(prediction_scores, seq_relationship_score,
                              batch['masked_lm_labels'],
                              batch['next_sentence_labels'])
-        self._grad_scaler.scale(loss).backward()
-        
-        if grad_accumulation_step:
+            loss = loss / self._grad_accumulation_steps
+        scaled_loss = self._grad_scaler.scale(loss)
+        scaled_loss.backward()
+        total = batch["input_ids"].shape[0]
+        if self.is_gradient_accumulation_step(kwargs["batch_num"]):
+            if "trainer" in kwargs:
+                kwargs["trainer"].logger.info("Taking backward step")
+            else:
+                print("Taking backward step")
             self._lr_scheduler.step()  # learning rate warmup
             self._grad_scaler.step(optimizer)
             self._grad_scaler.update()
             optimizer.zero_grad(set_to_none=True)
+        return {"loss": loss.detach().item(),
+                "scaled_loss": scaled_loss.detach().item(),
+                "total": total}
 
 
 class BertPretrainingCriterion(torch.nn.Module):
@@ -85,7 +100,8 @@ def get_model_and_config(config_file, sequence_output_is_dense):
     return model, config
 
 
-def get_optimizer(args, model, devices):
+def get_optimizer(model, devices, warmup_proportion,
+                  max_steps, learning_rate, init_loss_scale):
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta', 'LayerNorm']
 
@@ -94,13 +110,13 @@ def get_optimizer(args, model, devices):
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
 
     optimizer = FusedLAMBAMP(optimizer_grouped_parameters,
-                             lr=args.learning_rate)
+                             lr=learning_rate)
     lr_scheduler = PolyWarmUpScheduler(optimizer,
-                                       warmup=args.warmup_proportion,
-                                       total_steps=args.max_steps,
-                                       base_lr=args.learning_rate,
+                                       warmup=warmup_proportion,
+                                       total_steps=max_steps,
+                                       base_lr=learning_rate,
                                        device=torch.device(devices[0]))
-    grad_scaler = torch.cuda.amp.GradScaler(init_scale=args.init_loss_scale, enabled=args.fp16)
+    grad_scaler = torch.cuda.amp.GradScaler(init_scale=init_loss_scale, enabled=True)
     return optimizer, lr_scheduler, grad_scaler
 
 
@@ -118,60 +134,91 @@ def resume_optimizer(optimizer, checkpoint, phase1, phase2_from_scratch,
     optimizer.load_state_dict(checkpoint['optimizer'])  # , strict=False)
 
 
+def load_grad_scaler(self, saved_state):
+    self._grad_scaler.load_state_dict(saved_state["grad_scaler"])
+
+
 def main():
     args = Args.parse_arguments()
-    sequence_output_is_dense = args.dense_sequence_output
-    model, config = get_model_and_config(args.config_file, sequence_output_is_dense)
+    with open("train_config.json") as f:
+        default_config = SimpleNamespace(**json.load(f))
 
-    from types import SimpleNamespace
-    default_args = SimpleNamespace(device_batch_size=64,        # changed
-                                   device_batch_size_phase2=8,  # changed
-                                   warmup_proportion=0.2843,
-                                   warmup_proportion_phase2=0.128,
-                                   phase1_end_step=7038,
-                                   train_steps_phase2=1563,  # check
-                                   accumulate_gradients=True,
-                                   gradient_accumulation_steps=128,  # check
-                                   gradient_accumulation_steps_phase2=512,  # check
-                                   allreduce_post_accumulation=True,
-                                   allreduce_post_accumulation_fp16=True,
-                                   learning_rate=6e-3,        # check
-                                   learning_rate_phase2=4e-3,  # check
-                                   num_workers=4,              # check, changed
-                                   masking="static"            # check
-                                   ) 
+    for k, v in default_config.__dict__.items():
+        if k in args.__dict__ and not args.__dict__[k]:
+            args.__dict__[k] = v
+    sequence_output_is_dense = args.dense_sequence_output
+    model, config = get_model_and_config(args.model_config_file, sequence_output_is_dense)
+    model.model_name = "bert_base"
 
     # NOTE: For DataParallel, for DDP a different approach will have to be used
-    device_batch_size = args.device_batch_size
-    if args.devices == "-1":
-        devices = [torch.device("cpu")]
+    if args.start_phase2 or args.resume_phase2:
+        max_seq_len = 512
+        device_batch_size = 56
+        max_steps = args.train_steps_phase2
+        warmup_proportion = args.warmup_steps_phase2 / args.train_steps_phase2
+        learning_rate = args.learning_rate_phase2
+        phase2 = True
     else:
-        devices = [torch.device(f"cuda:{x}") for x in args.devices.split(",")]
+        device_batch_size = 480
+        max_seq_len = 128
+        max_steps = args.train_steps_phase1
+        warmup_proportion = args.warmup_steps_phase1 / args.train_steps_phase1
+        learning_rate = args.learning_rate_phase1
+        phase2 = False
+    if args.devices == "-1":
+        devices = ["cpu"]
+    else:
+        devices = [*map(int, args.devices.split(","))]
+    model = model.cuda(devices[0])
     loader_batch_size = device_batch_size * len(devices)
 
-    # NOTE: Effective train_batch_size is args.train_batch_size
-    # but we fetch loader_batch_size // gradient_accumulation_steps from dataloader
+    # NOTE: Effective train_batch_size is:
+    #       (device_batch_size * num_devices) * gradient_accumulation_steps
+    #       For dataparallel we fetch loader_batch_size (device_batch_size * num_devices)
+    #       which is the effective batch_size
     if args.gradient_accumulation_steps > 1:
-        effective_batch_size = loader_batch_size * args.gradient_accumulation_steps
+        effective_batch_size = loader_batch_size * len(devices) * args.gradient_accumulation_steps
+        print(f"Effective batch size is {effective_batch_size}")
+    loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
+                                   shuffle=not args.testing, max_seq_len=max_seq_len,
+                                   min_seq_len=30, truncate_stragety="truncate_second")
 
-    loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8, shuffle=False)
-    # If allreduce_post_accumulation_fp16 is not set, Native AMP Autocast is
-    # used along with FP32 gradient accumulation and all-reduce
-    if args.fp16 and args.allreduce_post_accumulation_fp16:
-        model.half()
-
-    if not args.disable_jit_fusions:
-        model = torch.jit.script(model)
-
-    optimizer, lr_scheduler, grad_scaler = get_optimizer(args, model, devices)
-
-    model.checkpoint_activations(args.checkpoint_activations)
-
+    optimizer, lr_scheduler, grad_scaler = get_optimizer(model, devices, warmup_proportion,
+                                                         max_steps, learning_rate,
+                                                         args.init_loss_scale)
     optimizer.setup_fp32_params()
+
+    num_epochs = math.ceil(max_steps * 256 / len(loader) / loader.batch_size)
     criterion = BertPretrainingCriterion(config.vocab_size,
                                          sequence_output_is_dense=sequence_output_is_dense)
 
-    import ipdb; ipdb.set_trace()
+    update_function = BertUpdateFunction(grad_scaler, lr_scheduler,
+                                         args.gradient_accumulation_steps)
+    torch.autograd.set_detect_anomaly(True)
+    trainer_params = {"gpus": devices, "cuda": True,
+                      "seed": args.seed, "resume": True,
+                      "metrics": ["loss", "scaled_loss", "total"], "val_frequency": 1,
+                      "test_frequency": 5, "log_frequency": 1, "max_epochs": num_epochs}
+    trainer_name = "bert_trainer_" + ("phase2" if phase2 else "phase1")
+    data = {"name": "books-wiki", "train": loader.dataset}
+    trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
+                      {"train": loader}, update_function, criterion,
+                      args.savedir, args.logdir, ddp_params={},
+                      extra_opts={"args": args.__dict__})
+    trainer._grad_scaler = grad_scaler
+    # trainer.save_optimizer = lambda : None
+    trainer.save_extra = lambda self: {"grad_scaler": self._grad_scaler.state_dict()}
+    trainer.load_extra = lambda self, saved_state: load_grad_scaler(self, saved_state)
+    desc = trainer.describe_hook("post_batch_hook")
+    if not any("post_batch_progress" in x for x in desc):
+        trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
+    trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
+    # TODO:
+    # 1. loader shuffle seed for deterministic load and save
+    #    BUT if we resume and it should not shuffle from same seed
+    # 2. Save on steps instead of epochs (maybe)
+    # trainer.test_loops()
+    trainer.train()
 
 
 if __name__ == '__main__':

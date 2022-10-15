@@ -294,10 +294,16 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0):
 
 
 
-def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True):
+def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
+                          max_seq_len=None, min_seq_len=None,
+                          truncate_stragety=None):
+    if max_seq_len is None:
+        raise ValueError("max_seq_len cannot be None")
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
     collate_fn = partial(mlm_collator, seq_align_len=seq_align_len, tokenizer=tokenizer)
-    data = BertDataset("books-wiki-tokenized", shuffle=shuffle)
+    data = BertDataset("books-wiki-tokenized", shuffle=shuffle,
+                       max_seq_len=max_seq_len, min_seq_len=min_seq_len,
+                       truncate_strategy=truncate_stragety)
     loader = torch.utils.data.DataLoader(data, shuffle=False,
                                          num_workers=num_workers, drop_last=False,
                                          pin_memory=True, batch_size=batch_size,
