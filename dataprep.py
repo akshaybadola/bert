@@ -47,7 +47,26 @@ def preprocess_data(train_data, tokenizer, num_proc=64, remove_text=True):
     return tokenized_dataset
 
 
-def save_data(dataset, seed=1122, path="./books-wiki-tokenized"):
+def preprocess_data_with_tokens(train_data, tokenizer, num_proc=64, remove_text=True):
+    def group_texts(tokenizer, examples):
+        return {**tokenizer(examples["text"], add_special_tokens=False,
+                            return_special_tokens_mask=False, return_attention_mask=False,
+                            return_token_type_ids=False, truncation=True,
+                            max_length=tokenizer.model_max_length),
+                "tokens": tokenizer.tokenize(examples["text"])}
+    from functools import partial
+    preproc_func = partial(group_texts, tokenizer)
+    if remove_text:
+        tokenized_dataset = train_data.map(preproc_func, batched=False,
+                                           remove_columns=["text"], num_proc=num_proc,
+                                           keep_in_memory=True)
+    else:
+        tokenized_dataset = train_data.map(preproc_func, batched=False,
+                                           num_proc=num_proc, keep_in_memory=True)
+    return tokenized_dataset
+
+
+def save_data(dataset, path="./books-wiki-tokenized"):
     dataset.save_to_disk(path)
 
 
@@ -55,8 +74,11 @@ def load_saved_data(path="./books-wiki-tokenized"):
     return load_from_disk(path)
 
 
-def build_wiki_books():
+def build_wiki_books(with_tokens=False):
     data = load_data()
     tokenizer = load_saved_tokenizer("bert-base-uncased-whole")
-    processed_data = preprocess_data(data, tokenizer, remove_text=False)
-    save_data(processed_data)
+    if with_tokens:
+        processed_data = preprocess_data_with_tokens(data, tokenizer, remove_text=False)
+    else:
+        processed_data = preprocess_data(data, tokenizer, remove_text=False)
+    save_data(processed_data, path="./books-wiki-tokenized-with-tokens")

@@ -6,15 +6,15 @@ import dataloader
 
 
 @pytest.fixture(scope="session")
-def data():
-    data = dataloader.BertDataset("books-wiki-tokenized", False)
-    return data
-
-
-@pytest.fixture(scope="session")
 def tokenizer():
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
     return tokenizer
+
+
+@pytest.fixture(scope="session")
+def data(tokenizer):
+    data = dataloader.BertDataset("books-wiki-tokenized", tokenizer, False)
+    return data
 
 
 @pytest.fixture(scope="session")

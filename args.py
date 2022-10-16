@@ -7,8 +7,9 @@ def parse_arguments():
     # Required parameters
     parser.add_argument("--model_config_file", required=True,
                         help="The BERT model config")
-
     # Other parameters
+    parser.add_argument("--optimizer", required=True,
+                        help="Which optimizer to use. [adam, lamb]")
     parser.add_argument("--max_predictions_per_seq",
                         default=80,
                         type=int,

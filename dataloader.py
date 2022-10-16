@@ -7,6 +7,9 @@ import numpy as np
 from transformers import AutoTokenizer
 import datasets
 
+from common_pyutil.monitor import Timer
+timer = Timer()
+
 
 # TODO: Add seed for numpy maybe
 class BertDataset(torch.utils.data.Dataset):
@@ -33,14 +36,17 @@ class BertDataset(torch.utils.data.Dataset):
 
     """
 
-    def __init__(self, location, shuffle=True, in_memory=False,
-                 max_seq_len=512, min_seq_len=None,
-                 truncate_strategy="proportional"):
-        self.data = datasets.load_from_disk(location, keep_in_memory=in_memory)
+    def __init__(self, location, tokenizer, shuffle=True,
+                 whole_word_mask=True, max_seq_len=512,
+                 min_seq_len=None, truncate_strategy="proportional"):
+        self.data = datasets.load_from_disk(location)
+        self.tokenizer = tokenizer
         self.inds = np.arange(len(self.data))
         self.truncate_strategy = truncate_strategy
         self.max_seq_len = max_seq_len
         self.min_seq_len = min_seq_len
+        self.cls = self.tokenizer.cls_token_id
+        self.sep = self.tokenizer.sep_token_id
         if shuffle:
             print("Shuffling dataset")
             np.random.shuffle(self.inds)
@@ -49,10 +55,7 @@ class BertDataset(torch.utils.data.Dataset):
         np.random.shuffle(self.inds)
 
     def __getitem__(self, i):
-        output = {x: None for x in
-                  ["input_ids", "token_type_ids",
-                   "attention_mask", "special_tokens_mask",
-                   "next_sentence_label"]}
+        output = {}
         if np.random.choice([0, 1]):
             sent_a, sent_b, next_sent =\
                 self.data[int(self.inds[i])], self.data[int(self.inds[i+1])], 1
@@ -64,14 +67,14 @@ class BertDataset(torch.utils.data.Dataset):
         # Since the max sentence length in the dataset is 512, if we
         # concatenate two sentences it becomes > 512. In that case, reduce
         # the lengths according to a strategy
-        max_seq_len = self.max_seq_len
-        if len_a + len_b - 1 > max_seq_len:
+        max_seq_len = self.max_seq_len - 3  # 3 special tokens
+        if len_a + len_b > max_seq_len:
             if self.truncate_strategy == "proportional":
-                limit_a = int(max_seq_len * len_a / (len_a+len_b))+1
+                limit_a = int(max_seq_len * len_a / (len_a+len_b))
                 limit_b = int(max_seq_len * len_b / (len_a+len_b))
             elif self.truncate_strategy == "truncate_second":
                 min_len_b = self.min_seq_len
-                max_len_a = max_seq_len - min_len_b
+                max_len_a = max_seq_len - min(min_len_b, len_b)
                 if len_a > max_len_a:
                     limit_a = max_len_a
                     limit_b = len_b if len_b < min_len_b else min_len_b
@@ -83,20 +86,54 @@ class BertDataset(torch.utils.data.Dataset):
         else:
             limit_a = len_a
             limit_b = len_b
-        sep = sent_a['input_ids'][-1]
-        output["input_ids"] = torch.as_tensor([*sent_a['input_ids'][:limit_a-1], sep,
-                                               *sent_b['input_ids'][1:limit_b-1], sep],
+        if "tokens" in sent_a:
+            words_a = sent_a['tokens'][:limit_a]
+            words_b = sent_b['tokens'][:limit_b]
+        else:
+            words_a = self.tokenizer.tokenize(sent_a['text'])[:limit_a]
+            words_b = self.tokenizer.tokenize(sent_b['text'])[:limit_b]
+        output = {}
+        split_a = []
+        split_b = []
+        i = 1
+        j = 1
+        for x in words_a:
+            if x.startswith("#"):
+                split_a.append(j)
+            else:
+                split_a.append(i)
+                j = i
+                i += 1
+        i = 1
+        j = 1
+        for x in words_b:
+            if x.startswith("#"):
+                split_b.append(j)
+            else:
+                split_b.append(i)
+                j = i
+                i += 1
+        # output['split_mask'] = torch.as_tensor([0, *[1 if x.startswith("#") else 0
+        #                                              for x in words_a],
+        #                                         0, *[1 if x.startswith("#") else 0
+        #                                              for x in words_b], 0])
+        output['split_tokens'] = torch.as_tensor([0, *split_a, 0,
+                                                  *(torch.as_tensor(split_b) + max(split_a)), 0])
+        output['split_range'] = torch.arange(1, output['split_tokens'].max()+1)
+        output["input_ids"] = torch.as_tensor([self.cls,
+                                               *sent_a['input_ids'][:limit_a], self.sep,
+                                               *sent_b['input_ids'][:limit_b], self.sep],
                                               dtype=torch.long)
-        output["token_type_ids"] = torch.as_tensor([*sent_a['token_type_ids'][:limit_a],
-                                                    *[1 for _ in sent_b['token_type_ids'][1:limit_b]]],
-                                                   dtype=torch.long)
-        output["attention_mask"] = torch.ones(len(sent_a['input_ids'][:limit_a])
-                                              + len(sent_b['input_ids'][:limit_b]) - 1,
-                                              dtype=torch.long)
-        output["special_tokens_mask"] = torch.as_tensor([*sent_a['special_tokens_mask'][:limit_a-1], 1,
-                                                         *sent_b['special_tokens_mask'][1:limit_b-1], 1],
-                                                        dtype=torch.long)
+        output["token_type_ids"] = torch.cat((torch.zeros(limit_a+2, dtype=torch.long),
+                                              torch.ones(limit_b+1, dtype=torch.long)))
+        output["attention_mask"] = torch.ones_like(output['input_ids'])
+        output["special_tokens_mask"] = torch.as_tensor(
+            self.tokenizer.get_special_tokens_mask(output['input_ids'],
+                                                   already_has_special_tokens=True),
+            dtype=torch.long)
         output["next_sentence_label"] = next_sent
+        # if output['split_tokens'].any():
+        #     import ipdb; ipdb.set_trace()
         return output
 
     def __len__(self):
@@ -123,6 +160,7 @@ def _mask_tokens(inputs, special_tokens_mask=None, tokenizer=None,
     80% MASK, 10% random, 10% original.
 
     """
+    _inputs = inputs.clone()
     labels = inputs.clone()
     # We sample a few tokens in each sequence for MLM training (with probability
     # `mlm_probability`)
@@ -143,6 +181,39 @@ def _mask_tokens(inputs, special_tokens_mask=None, tokenizer=None,
 
     # 80% of the time, we replace masked input tokens with tokenizer.mask_token
     # ([MASK])
+    indices_replaced = (torch.bernoulli(torch.full(labels.shape, 0.8)).bool() &
+                        masked_indices)
+    _inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(
+        tokenizer.mask_token)
+
+    # 10% of the time, we replace masked input tokens with random word
+    indices_random = (torch.bernoulli(torch.full(labels.shape, 0.5)).bool() &
+                      masked_indices & ~indices_replaced)
+    random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
+    _inputs[indices_random] = random_words[indices_random]
+
+    # The rest of the time (10% of the time) we keep the masked input tokens
+    # unchanged
+    return _inputs, labels
+
+
+def _mask_whole_words(inputs, special_tokens_mask=None,
+                      tokenizer=None, split_tokens=None,
+                      split_range=None, mlm_probability=0.15, ignore_index=-1):
+    inputs = inputs.clone()
+    labels = inputs.clone()
+    # We sample a few tokens in each sequence for MLM training (with probability
+    # `mlm_probability`)
+    pm = torch.full(split_range.shape, mlm_probability)
+    pm[~split_range.bool()] = 0
+    replacements = torch.bernoulli(pm)
+    masked_indices = torch.empty(inputs.shape, dtype=torch.bool)
+    for i in range(len(inputs)):
+        repl_inds = set(torch.where(replacements[i] == 1)[0].tolist())
+        masked_indices[i] = torch.as_tensor([*map(lambda x: x in repl_inds,
+                                                  split_tokens[i].tolist())],
+                                            dtype=bool)
+    labels[~masked_indices] = ignore_index
     indices_replaced = (torch.bernoulli(torch.full(labels.shape, 0.8)).bool() &
                         masked_indices)
     inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(
@@ -255,7 +326,7 @@ def collator_alt(batch, seq_align_len, tokenizer):
     return output
 
 
-def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0):
+def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0, mask_whole_words=False):
     """Collate for MLM task
 
     Args:
@@ -276,22 +347,35 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0):
     mask_tensor = torch.zeros(size, dtype=torch.long)
     special_tokens_mask_tensor = torch.zeros(size, dtype=torch.long)
     token_type_id_tensor = torch.zeros(size, dtype=torch.long)
+    if mask_whole_words:
+        split_tokens_tensor = torch.zeros(size, dtype=torch.long)
+        split_range_tensor = torch.zeros(size, dtype=torch.long)
     next_sentence_labels = []
     with torch.no_grad():
         for i, x in enumerate(batch):
-            input_tensor[i, :lengths[i]] = x['input_ids']
-            mask_tensor[i, :lengths[i]] = x['attention_mask']
-            special_tokens_mask_tensor[i, :lengths[i]] = x['special_tokens_mask']
-            token_type_id_tensor[i, :lengths[i]] = x['token_type_ids']
+            limit = lengths[i]
+            input_tensor[i, :limit] = x['input_ids']
+            mask_tensor[i, :limit] = x['attention_mask']
+            special_tokens_mask_tensor[i, :limit] = x['special_tokens_mask']
+            token_type_id_tensor[i, :limit] = x['token_type_ids']
+            if mask_whole_words:
+                split_tokens_tensor[i, :limit] = x['split_tokens']
+                split_range_tensor[i, :x['split_range'].max()] = x['split_range']
             next_sentence_labels.append(x['next_sentence_label'])
-        output["input_ids"], output["masked_lm_labels"] = _mask_tokens(
-            input_tensor, tokenizer=tokenizer,
-            special_tokens_mask=special_tokens_mask_tensor)
+        if mask_whole_words:
+            output["input_ids"], output["masked_lm_labels"] = _mask_whole_words(
+                input_tensor, tokenizer=tokenizer,
+                special_tokens_mask=special_tokens_mask_tensor,
+                split_tokens=split_tokens_tensor,
+                split_range=split_range_tensor)
+        else:
+            output["input_ids"], output["masked_lm_labels"] = _mask_tokens(
+                input_tensor, tokenizer=tokenizer,
+                special_tokens_mask=special_tokens_mask_tensor)
         output["attention_mask"] = mask_tensor
         output["token_type_ids"] = token_type_id_tensor
         output["next_sentence_labels"] = torch.as_tensor(next_sentence_labels)
     return output
-
 
 
 def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
@@ -299,11 +383,15 @@ def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
                           truncate_stragety=None):
     if max_seq_len is None:
         raise ValueError("max_seq_len cannot be None")
+    mask_whole_words = True
+    if mask_whole_words:
+        print("Whole word masking is on")
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
-    collate_fn = partial(mlm_collator, seq_align_len=seq_align_len, tokenizer=tokenizer)
-    data = BertDataset("books-wiki-tokenized", shuffle=shuffle,
-                       max_seq_len=max_seq_len, min_seq_len=min_seq_len,
-                       truncate_strategy=truncate_stragety)
+    collate_fn = partial(mlm_collator, seq_align_len=seq_align_len,
+                         tokenizer=tokenizer, mask_whole_words=mask_whole_words)
+    data = BertDataset("books-wiki-tokenized-with-tokens", tokenizer,
+                       shuffle=shuffle, max_seq_len=max_seq_len,
+                       min_seq_len=min_seq_len, truncate_strategy=truncate_stragety)
     loader = torch.utils.data.DataLoader(data, shuffle=False,
                                          num_workers=num_workers, drop_last=False,
                                          pin_memory=True, batch_size=batch_size,

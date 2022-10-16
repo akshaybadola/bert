@@ -55,10 +55,10 @@ class BertUpdateFunction(SimpleUpdateFunction):
         scaled_loss.backward()
         total = batch["input_ids"].shape[0]
         if self.is_gradient_accumulation_step(kwargs["batch_num"]):
-            if "trainer" in kwargs:
-                kwargs["trainer"].logger.info("Taking backward step")
-            else:
-                print("Taking backward step")
+            # if "trainer" in kwargs:
+            #     kwargs["trainer"].logger.info("Taking backward step")
+            # else:
+            #     print("Taking backward step")
             self._lr_scheduler.step()  # learning rate warmup
             self._grad_scaler.step(optimizer)
             self._grad_scaler.update()
@@ -100,7 +100,7 @@ def get_model_and_config(config_file, sequence_output_is_dense):
     return model, config
 
 
-def get_optimizer(model, devices, warmup_proportion,
+def get_optimizer(optimizer_name, model, devices, warmup_proportion,
                   max_steps, learning_rate, init_loss_scale):
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta', 'LayerNorm']
@@ -109,8 +109,14 @@ def get_optimizer(model, devices, warmup_proportion,
         {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
 
-    optimizer = FusedLAMBAMP(optimizer_grouped_parameters,
-                             lr=learning_rate)
+    if optimizer_name == "lamb":
+        optimizer = FusedLAMBAMP(optimizer_grouped_parameters,
+                                 lr=learning_rate)
+    elif optimizer_name == "adam":
+        optimizer = torch.optim.Adam(optimizer_grouped_parameters,
+                                     lr=learning_rate)
+    else:
+        raise ValueError(f"Unknown optmizer {optimizer_name}")
     lr_scheduler = PolyWarmUpScheduler(optimizer,
                                        warmup=warmup_proportion,
                                        total_steps=max_steps,
@@ -136,6 +142,15 @@ def resume_optimizer(optimizer, checkpoint, phase1, phase2_from_scratch,
 
 def load_grad_scaler(self, saved_state):
     self._grad_scaler.load_state_dict(saved_state["grad_scaler"])
+
+
+def save_checkpoint(self, **kwargs):
+    batch_num = kwargs["batch_num"]
+    if not (batch_num+1) % 100000:
+        prefix = f"{batch_num:06}_"
+        save_name = f"{prefix}_{self.checkpoint_name}"
+        self.logger.info(f"Saving to {save_name}")
+        self._save(save_name)
 
 
 def main():
@@ -183,10 +198,17 @@ def main():
                                    shuffle=not args.testing, max_seq_len=max_seq_len,
                                    min_seq_len=30, truncate_stragety="truncate_second")
 
-    optimizer, lr_scheduler, grad_scaler = get_optimizer(model, devices, warmup_proportion,
+    optimizer, lr_scheduler, grad_scaler = get_optimizer(args.optimizer,
+                                                         model, devices, warmup_proportion,
                                                          max_steps, learning_rate,
                                                          args.init_loss_scale)
-    optimizer.setup_fp32_params()
+    if args.optimizer == "lamb":
+        optimizer.setup_fp32_params()
+    elif args.optimizer == "adam":
+        print("Will ignore gradient accumulation steps")
+        args.gradient_accumulation_steps = 1
+    else:
+        raise ValueError(f"Unknown optmizer {args.optimizer}")
 
     num_epochs = math.ceil(max_steps * 256 / len(loader) / loader.batch_size)
     criterion = BertPretrainingCriterion(config.vocab_size,
@@ -198,7 +220,7 @@ def main():
     trainer_params = {"gpus": devices, "cuda": True,
                       "seed": args.seed, "resume": True,
                       "metrics": ["loss", "scaled_loss", "total"], "val_frequency": 1,
-                      "test_frequency": 5, "log_frequency": 1, "max_epochs": num_epochs}
+                      "test_frequency": 5, "log_frequency": 5, "max_epochs": num_epochs}
     trainer_name = "bert_trainer_" + ("phase2" if phase2 else "phase1")
     data = {"name": "books-wiki", "train": loader.dataset}
     trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
@@ -213,6 +235,7 @@ def main():
     if not any("post_batch_progress" in x for x in desc):
         trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
     trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
+    trainer.add_to_hook_at_end("post_batch_hook", save_checkpoint)
     # TODO:
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
