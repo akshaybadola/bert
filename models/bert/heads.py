@@ -1,7 +1,7 @@
 from typing import Final
 import torch
 import torch.nn as nn
-    
+
 from .modules import LinearActivation
 
 

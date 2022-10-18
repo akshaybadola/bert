@@ -6,7 +6,7 @@ import math
 import torch
 
 import args as Args
-import modeling
+from bert import modeling
 from schedulers import PolyWarmUpScheduler
 from lamb_amp_opt.fused_lamb import FusedLAMBAMP
 
@@ -37,7 +37,7 @@ class BertUpdateFunction(SimpleUpdateFunction):
         else:
             self._batch_starts_from_zero = False
         if self._batch_starts_from_zero:
-            batch_num = batch_num + 1 
+            batch_num = batch_num + 1
         return not (batch_num % self._grad_accumulation_steps)
 
     def __call__(self, batch, criterion, model, optimizer, **kwargs):

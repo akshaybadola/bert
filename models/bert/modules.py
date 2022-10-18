@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from .functions import ACT2FN
+from ..functions import ACT2FN
 
 
 class LinearActivation(nn.Module):
