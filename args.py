@@ -10,8 +10,10 @@ def parse_arguments():
                         help="The BERT model config")
     parser.add_argument("--model_config_file", required=True,
                         help="The BERT model config")
+    parser.add_argument("--dataset", required=True)
 
     # Other parameters
+    parser.add_argument("--train_strategy", default="epoch", help="One of [epochs, steps]")
     parser.add_argument("--train_config_file", required=True,
                         help="The BERT model config")
     parser.add_argument("--optimizer", required=True,

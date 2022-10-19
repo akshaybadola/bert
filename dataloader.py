@@ -18,8 +18,148 @@ class BertDatasetWithSense(torch.utils.data.Dataset):
         pass
 
 
+class BertDatasetOWT(torch.utils.data.Dataset):
+    """Return a sentence pair from the dataset
+
+    Pick two sentences :code:`sentence_a`, and :code:`sentence_b` from data
+
+    50% of the time :code:`sentence_b` is next sentence, rest random
+
+    Return [CLS] :code:`sentence_a` [SEP] :code:`sentence_b` [SEP]
+    and :code:`next_sent` if next sentence is :code:`sentence_b`
+
+    Args:
+        location: Path to dataset
+        shuffle: Shuffle the dataset after loading
+        in_memory: Load the entire dataset in memory
+        max_seq_len: Maximum length of the training example
+        min_seq_len: Minimum length of the training example. Only
+                     used with :code:`truncate_second` truncate_strategy
+        truncate_stragety: The strategy to use if the training example > max_seq_len
+                           one of :code:`proportional` or :code:`truncate_second`
+    :code:`in_memory` doesn't seem to lead to any significant speedup and can be avoided
+    though it can be tested individually
+
+    """
+
+    def __init__(self, tokenizer, whole_word_mask=True, max_seq_len=128,
+                 min_seq_len=30, truncate_strategy="truncate_second"):
+        self.data = datasets.load_dataset("openwebtext")['train']
+        self.tokenizer = tokenizer
+        self.inds = np.arange(len(self.data))
+        self.truncate_strategy = truncate_strategy
+        self.max_seq_len = max_seq_len
+        self.min_seq_len = min_seq_len
+        self.cls = self.tokenizer.cls_token_id
+        self.sep = self.tokenizer.sep_token_id
+
+    def __getitem__(self, i):
+        output = {}
+        doc = self.data[i]['text']
+        lines = doc.split("\n\n")
+        if len(lines) == 1:
+            ind = np.random.choice(self.inds)
+            sent_a = lines[0]
+            sent_b = np.random.choice(self.data[int(ind)]['text'].split("\n\n"))
+            next_sent = 0
+        elif len(lines) > 1 and np.random.choice([0, 1]):
+            sent_a, sent_b = np.random.choice(lines, 2, replace=False)
+            next_sent = 1
+        else:
+            ind = np.random.choice(self.inds)
+            sent_a = np.random.choice(lines, 1, replace=False)[0]
+            sent_b = np.random.choice(self.data[int(ind)]['text'].split("\n\n"))
+            next_sent = 0
+        words_a, words_b = self.tokenizer.tokenize(sent_a), self.tokenizer.tokenize(sent_b)
+        len_a = len(words_a)
+        len_b = len(words_b)
+        # Since the max sentence length in the dataset is 512, if we
+        # concatenate two sentences it becomes > 512. In that case, reduce
+        # the lengths according to a strategy
+        max_seq_len = self.max_seq_len - 3  # 3 special tokens
+        if len_a + len_b > max_seq_len:
+            if self.truncate_strategy == "proportional":
+                limit_a = int(max_seq_len * len_a / (len_a+len_b))
+                limit_b = int(max_seq_len * len_b / (len_a+len_b))
+            elif self.truncate_strategy == "truncate_second":
+                min_len_b = self.min_seq_len
+                max_len_a = max_seq_len - min(min_len_b, len_b)
+                if len_a > max_len_a:
+                    limit_a = max_len_a
+                    limit_b = len_b if len_b < min_len_b else min_len_b
+                else:
+                    limit_a = len_a
+                    limit_b = max_seq_len - len_a
+            else:
+                raise ValueError(f"Unknown truncate strategy {self.truncate_strategy}")
+        else:
+            limit_a = len_a
+            limit_b = len_b
+        output = {}
+        split_a = []
+        split_b = []
+        i = 1
+        j = 1
+        for x in words_a[:limit_a]:
+            if x.startswith("#"):
+                split_a.append(j)
+            else:
+                split_a.append(i)
+                j = i
+                i += 1
+        i = 1
+        j = 1
+        for x in words_b[:limit_b]:
+            if x.startswith("#"):
+                split_b.append(j)
+            else:
+                split_b.append(i)
+                j = i
+                i += 1
+        dont_in_sent_a = "do not" in sent_a
+        dont_in_sent_b = "do not" in sent_b
+        with timer:
+            converted_a = self.tokenizer.convert_tokens_to_string(words_a[:limit_a])
+            converted_b = self.tokenizer.convert_tokens_to_string(words_b[:limit_b])
+            if dont_in_sent_a and "don't" in sent_a:
+                converted_a = converted_a.replace("do not", "don't")
+            if dont_in_sent_b and "don't" in sent_b:
+                converted_b = converted_b.replace("do not", "don't")
+            output = self.tokenizer(converted_a,
+                                    converted_b,
+                                    return_special_tokens_mask=True, return_tensors="pt")
+            len_output_a = output['input_ids'].shape[1]
+        time_a = timer.time
+        with timer:
+            output = {}
+            output["input_ids"] = torch.as_tensor(
+                [self.cls,
+                 *self.tokenizer.convert_tokens_to_ids(words_a[:limit_a]),
+                 self.sep,
+                 *self.tokenizer.convert_tokens_to_ids(words_b[:limit_b]),
+                 self.sep],
+                dtype=torch.long)
+            output["token_type_ids"] = torch.cat((torch.zeros(limit_a+2, dtype=torch.long),
+                                                  torch.ones(limit_b+1, dtype=torch.long)))
+            output["attention_mask"] = torch.ones_like(output['input_ids'])
+            output["special_tokens_mask"] = torch.as_tensor(
+                self.tokenizer.get_special_tokens_mask(output['input_ids'],
+                                                       already_has_special_tokens=True),
+                dtype=torch.long)
+        time_b = timer.time
+        output['split_tokens'] = torch.as_tensor([0, *split_a, 0,
+                                                  *(torch.as_tensor(split_b) + max(split_a)), 0])
+        output['split_range'] = torch.arange(1, output['split_tokens'].max()+1)
+        output["next_sentence_label"] = next_sent
+        len_output_b = len(output['input_ids'])
+        return output, time_a, time_b, len_output_a, len_output_b
+
+    def __len__(self):
+        return len(self.data)
+
+
 # TODO: Add seed for numpy maybe
-class BertDataset(torch.utils.data.Dataset):
+class BertDatasetBooksWiki(torch.utils.data.Dataset):
     """Return a sentence pair from the dataset
 
     Pick two sentences :code:`sentence_a`, and :code:`sentence_b` from data
@@ -396,10 +536,31 @@ def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
     collate_fn = partial(mlm_collator, seq_align_len=seq_align_len,
                          tokenizer=tokenizer, mask_whole_words=mask_whole_words)
-    data = BertDataset("books-wiki-tokenized-with-tokens", tokenizer,
-                       shuffle=shuffle, max_seq_len=max_seq_len,
-                       min_seq_len=min_seq_len, truncate_strategy=truncate_stragety)
+    data = BertDatasetBooksWiki("books-wiki-tokenized-with-tokens", tokenizer,
+                                shuffle=shuffle, max_seq_len=max_seq_len,
+                                min_seq_len=min_seq_len, truncate_strategy=truncate_stragety)
     loader = torch.utils.data.DataLoader(data, shuffle=False,
+                                         num_workers=num_workers, drop_last=False,
+                                         pin_memory=True, batch_size=batch_size,
+                                         collate_fn=collate_fn)
+    return loader
+
+
+def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
+                   max_seq_len=None, min_seq_len=None, truncate_stragety=None):
+    if max_seq_len is None:
+        raise ValueError("max_seq_len cannot be None")
+    mask_whole_words = True
+    if mask_whole_words:
+        print("Whole word masking is on")
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
+    collate_fn = partial(mlm_collator, seq_align_len=seq_align_len,
+                         tokenizer=tokenizer, mask_whole_words=mask_whole_words)
+    data = BertDatasetOWT(tokenizer, max_seq_len=max_seq_len,
+                          min_seq_len=min_seq_len, truncate_strategy=truncate_stragety)
+    sampler = torch.utils.data.RandomSampler(data, replacement=True,
+                                             num_samples=num_train_examples)
+    loader = torch.utils.data.DataLoader(data, sampler=sampler,
                                          num_workers=num_workers, drop_last=False,
                                          pin_memory=True, batch_size=batch_size,
                                          collate_fn=collate_fn)

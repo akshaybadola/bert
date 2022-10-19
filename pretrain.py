@@ -11,7 +11,7 @@ from models.bert import modeling
 from schedulers import PolyWarmUpScheduler
 from lamb_amp_opt.fused_lamb import FusedLAMBAMP
 
-from dataloader import get_wiki_books_loader
+from dataloader import get_wiki_books_loader, get_owt_loader
 from simple_trainer.helpers import SimpleUpdateFunction
 from simple_trainer.trainer import Trainer
 from simple_trainer import functions
@@ -188,14 +188,22 @@ def main():
     #       (device_batch_size * num_devices) * gradient_accumulation_steps
     #       For dataparallel we fetch loader_batch_size (device_batch_size * num_devices)
     #       which is the effective batch_size
+    if args.optimizer == "adam":
+        args.gradient_accumulation_steps = 1
     if args.gradient_accumulation_steps > 1:
         effective_batch_size = loader_batch_size * len(devices) * args.gradient_accumulation_steps
         print(f"loader_batch_size is {loader_batch_size}")
         print(f"Effective batch size is {effective_batch_size}")
-    loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
-                                   shuffle=not args.testing, max_seq_len=max_seq_len,
-                                   min_seq_len=30, truncate_stragety="truncate_second")
-
+    if args.dataset == "bookswiki":
+        loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
+                                       shuffle=not args.testing, max_seq_len=max_seq_len,
+                                       min_seq_len=30, truncate_stragety="truncate_second")
+    elif args.dataset == "owt":
+        if args.train_strategy == "epoch" and args.dataset == "owt":
+            raise ValueError("Epoch wise training not supported with OWT")
+        loader = get_owt_loader(max_steps * 256, loader_batch_size, args.num_workers, 8,
+                                max_seq_len=max_seq_len,
+                                min_seq_len=30, truncate_stragety="truncate_second")
     optimizer, lr_scheduler, grad_scaler = get_optimizer(args.optimizer,
                                                          model, devices, warmup_proportion,
                                                          max_steps, learning_rate,
@@ -208,19 +216,23 @@ def main():
     else:
         raise ValueError(f"Unknown optmizer {args.optimizer}")
 
-    num_epochs = math.ceil(max_steps * 256 / len(loader) / loader.batch_size)
+    if args.train_strategy == "epoch":
+        num_epochs = math.ceil(max_steps * 256 / len(loader) / loader.batch_size)
+    elif args.train_strategy == "steps":
+        num_epochs = 1
     criterion = BertPretrainingCriterion(config.vocab_size,
                                          sequence_output_is_dense=sequence_output_is_dense)
 
     update_function = BertUpdateFunction(grad_scaler, lr_scheduler,
                                          args.gradient_accumulation_steps)
+    torch.backends.cudnn.benchmark = True
     torch.autograd.set_detect_anomaly(True)
     trainer_params = {"gpus": devices, "cuda": True,
                       "seed": args.seed, "resume": True,
                       "metrics": ["loss", "scaled_loss", "total"], "val_frequency": 1,
                       "test_frequency": 5, "log_frequency": 5, "max_epochs": num_epochs}
     trainer_name = "bert_trainer_" + ("phase2" if phase2 else "phase1")
-    data = {"name": "books-wiki", "train": loader.dataset}
+    data = {"name": args.dataset, "train": loader.dataset}
     trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
                       {"train": loader}, update_function, criterion,
                       args.savedir, args.logdir, ddp_params={},
@@ -232,15 +244,15 @@ def main():
     desc = trainer.describe_hook("post_batch_hook")
     if not any("post_batch_progress" in x for x in desc):
         trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
-    trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
+    # trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
     _save_checkpoint = partial(functions.post_batch_save_checkpoint, num_iters=10000)
     trainer.add_to_hook_at_end("post_batch_hook", lambda self, **kwargs: _save_checkpoint)
     # TODO:
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
     # 2. Save on steps instead of epochs (maybe)
+    import ipdb; ipdb.set_trace()
     trainer.test_loops(200)
-    # import ipdb; ipdb.set_trace()
     # trainer.train()
 
 

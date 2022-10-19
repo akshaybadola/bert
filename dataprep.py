@@ -1,4 +1,6 @@
-from transformers import BertTokenizer, BertModel
+from functools import partial
+
+from transformers import BertTokenizer, BertModel, AutoTokenizer
 from datasets import load_dataset, concatenate_datasets, load_from_disk
 from transformers import BertTokenizerFast
 
@@ -66,6 +68,28 @@ def preprocess_data_with_tokens(train_data, tokenizer, num_proc=64, remove_text=
     return tokenized_dataset
 
 
+def preprocess_data_text(train_data, tokenizer, num_proc=64, min_length=5):
+    def _filter_func(tokenizer, min_length, line):
+        tokenized = tokenizer.tokenize(line)
+        return tokenized and len(tokenized) > min_length
+
+    filter_func = partial(_filter_func, tokenizer, min_length)
+
+    def preprocess(tokenizer, examples):
+        lines = examples['text'].split("\n\n")
+        filtered = [*filter(filter_func, lines)]
+        tokens = [*map(tokenizer.tokenize, filtered)]
+        input_ids = [*map(tokenizer.convert_tokens_to_ids, tokens)]
+        return {"text": "\n\n".join(filtered),
+                "tokens": tokens,
+                "input_ids": input_ids}
+    preproc_func = partial(preprocess, tokenizer)
+    processed_dataset = train_data.map(preproc_func, batched=False,
+                                       num_proc=num_proc,
+                                       keep_in_memory=True)
+    return processed_dataset
+
+
 def preprocess_data_with_markers(train_data, tokenizer, num_proc=64, remove_text=True):
     def group_texts(tokenizer, examples):
         tokens = tokenizer.tokenize(examples["text"])
@@ -118,3 +142,10 @@ def build_wiki_books(with_tokens=False):
     else:
         processed_data = preprocess_data(data, tokenizer, remove_text=False)
     save_data(processed_data, path="./books-wiki-tokenized-with-tokens")
+
+
+def process_owt(num_proc=8):
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
+    owt = load_dataset("openwebtext")
+    processed_data = preprocess_data_text(owt['train'], tokenizer, num_proc, 5)
+    save_data(processed_data, path="./owt-filtered-with-tokens")
