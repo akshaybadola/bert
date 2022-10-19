@@ -2,11 +2,12 @@ from typing import Final
 from types import SimpleNamespace
 import json
 import math
+from functools import partial
 
 import torch
 
 import args as Args
-from bert import modeling
+from models.bert import modeling
 from schedulers import PolyWarmUpScheduler
 from lamb_amp_opt.fused_lamb import FusedLAMBAMP
 
@@ -91,7 +92,7 @@ class BertPretrainingCriterion(torch.nn.Module):
         return total_loss
 
 
-def get_model_and_config(config_file, sequence_output_is_dense):
+def get_model_and_config(model_name, config_file, sequence_output_is_dense):
     config = modeling.BertConfig.from_json_file(config_file)
     # Padding for divisibility by 8
     if config.vocab_size % 8 != 0:
@@ -144,38 +145,34 @@ def load_grad_scaler(self, saved_state):
     self._grad_scaler.load_state_dict(saved_state["grad_scaler"])
 
 
-def save_checkpoint(self, **kwargs):
-    batch_num = kwargs["batch_num"]
-    if not (batch_num+1) % 100000:
-        prefix = f"{batch_num:06}_"
-        save_name = f"{prefix}_{self.checkpoint_name}"
-        self.logger.info(f"Saving to {save_name}")
-        self._save(save_name)
-
-
 def main():
     args = Args.parse_arguments()
-    with open("train_config.json") as f:
-        default_config = SimpleNamespace(**json.load(f))
-
+    if args.train_config_file:
+        with open(args.train_config_file) as f:
+            default_config = SimpleNamespace(**json.load(f))
+    else:
+        default_config = SimpleNamespace()
     for k, v in default_config.__dict__.items():
         if k in args.__dict__ and not args.__dict__[k]:
             args.__dict__[k] = v
+        elif k not in args.__dict__:
+            args.__dict__[k] = v
     sequence_output_is_dense = args.dense_sequence_output
-    model, config = get_model_and_config(args.model_config_file, sequence_output_is_dense)
-    model.model_name = "bert_base"
+    model, config = get_model_and_config(args.model_name, args.model_config_file,
+                                         sequence_output_is_dense)
+    model.model_name = args.model_name
 
     # NOTE: For DataParallel, for DDP a different approach will have to be used
     if args.start_phase2 or args.resume_phase2:
-        max_seq_len = 512
-        device_batch_size = 56
+        max_seq_len = args.max_seq_len_phase2
+        device_batch_size = args.device_batch_size_phase2
         max_steps = args.train_steps_phase2
         warmup_proportion = args.warmup_steps_phase2 / args.train_steps_phase2
         learning_rate = args.learning_rate_phase2
         phase2 = True
     else:
-        device_batch_size = 480
-        max_seq_len = 128
+        device_batch_size = args.device_batch_size_phase1
+        max_seq_len = args.max_seq_len_phase1
         max_steps = args.train_steps_phase1
         warmup_proportion = args.warmup_steps_phase1 / args.train_steps_phase1
         learning_rate = args.learning_rate_phase1
@@ -193,6 +190,7 @@ def main():
     #       which is the effective batch_size
     if args.gradient_accumulation_steps > 1:
         effective_batch_size = loader_batch_size * len(devices) * args.gradient_accumulation_steps
+        print(f"loader_batch_size is {loader_batch_size}")
         print(f"Effective batch size is {effective_batch_size}")
     loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
                                    shuffle=not args.testing, max_seq_len=max_seq_len,
@@ -235,13 +233,15 @@ def main():
     if not any("post_batch_progress" in x for x in desc):
         trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
     trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
-    trainer.add_to_hook_at_end("post_batch_hook", save_checkpoint)
+    _save_checkpoint = partial(functions.post_batch_save_checkpoint, num_iters=10000)
+    trainer.add_to_hook_at_end("post_batch_hook", lambda self, **kwargs: _save_checkpoint)
     # TODO:
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
     # 2. Save on steps instead of epochs (maybe)
-    # trainer.test_loops()
-    trainer.train()
+    trainer.test_loops(200)
+    # import ipdb; ipdb.set_trace()
+    # trainer.train()
 
 
 if __name__ == '__main__':

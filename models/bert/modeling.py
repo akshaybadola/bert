@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils import checkpoint
 
-from bert.modules import BertLayer, LinearActivation, BertEmbeddings, BertPooler
-from bert.heads import BertPreTrainingHeads, BertOnlyMLMHead
+from .modules import BertLayer, LinearActivation, BertEmbeddings, BertPooler
+from .heads import BertPreTrainingHeads, BertOnlyMLMHead
 
 
 class BertConfig(object):

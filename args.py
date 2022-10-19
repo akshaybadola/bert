@@ -1,3 +1,4 @@
+import os
 import argparse
 
 
@@ -5,9 +6,14 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
 
     # Required parameters
+    parser.add_argument("--model_name", required=True,
+                        help="The BERT model config")
     parser.add_argument("--model_config_file", required=True,
                         help="The BERT model config")
+
     # Other parameters
+    parser.add_argument("--train_config_file", required=True,
+                        help="The BERT model config")
     parser.add_argument("--optimizer", required=True,
                         help="Which optimizer to use. [adam, lamb]")
     parser.add_argument("--max_predictions_per_seq",
@@ -106,4 +112,13 @@ def parse_arguments():
     args = parser.parse_args()
     args.fp16 = args.fp16 or args.amp
 
+    return check_args(args)
+
+
+def check_args(args):
+    model_configs = [x.split(".json")[0] for x in 
+                     os.listdir(os.path.dirname(__file__) + "/configs")
+                     if ("train" not in x.split(".json")[0] and
+                         "eval" not in x.split(".json")[0])]
+    assert args.model_name in model_configs, f"Model name {args.model_name} not in configs"
     return args

@@ -11,6 +11,13 @@ from common_pyutil.monitor import Timer
 timer = Timer()
 
 
+class BertDatasetWithSense(torch.utils.data.Dataset):
+    # send
+    def __getitem__(self, i):
+        {"important_word_mask": torch.as_tensor([0])}
+        pass
+
+
 # TODO: Add seed for numpy maybe
 class BertDataset(torch.utils.data.Dataset):
     """Return a sentence pair from the dataset

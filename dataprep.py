@@ -66,6 +66,42 @@ def preprocess_data_with_tokens(train_data, tokenizer, num_proc=64, remove_text=
     return tokenized_dataset
 
 
+def preprocess_data_with_markers(train_data, tokenizer, num_proc=64, remove_text=True):
+    def group_texts(tokenizer, examples):
+        tokens = tokenizer.tokenize(examples["text"])
+        # i = 0
+        # j = 0
+        # for x in tokens:
+        #     if x.startswith("#"):
+        #         split_a.append(j)
+        #     else:
+        #         split_a.append(i)
+        #         j = i
+        #         i += 1
+        # text = examples["text"]
+        # text == "The child is eating strawberries"
+        # markers == ["child", "eating", "straberries"]
+        # tokens == ["The", "child", "is", "eating", "straw", "##berries"]
+        # output == [0, 1, 0, 1, 1, 1]
+        markers = []
+        return {**tokenizer(examples["text"], add_special_tokens=False,
+                            return_special_tokens_mask=False, return_attention_mask=False,
+                            return_token_type_ids=False, truncation=True,
+                            max_length=tokenizer.model_max_length),
+                "markers": markers,
+                "tokens": tokens}
+    from functools import partial
+    preproc_func = partial(group_texts, tokenizer)
+    if remove_text:
+        tokenized_dataset = train_data.map(preproc_func, batched=False,
+                                           remove_columns=["text"], num_proc=num_proc,
+                                           keep_in_memory=True)
+    else:
+        tokenized_dataset = train_data.map(preproc_func, batched=False,
+                                           num_proc=num_proc, keep_in_memory=True)
+    return tokenized_dataset
+
+
 def save_data(dataset, path="./books-wiki-tokenized"):
     dataset.save_to_disk(path)
 
