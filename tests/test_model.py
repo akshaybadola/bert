@@ -1,6 +1,8 @@
 import sys
 from functools import partial
 
+import pytest
+
 import torch
 from transformers import AutoTokenizer
 from common_pyutil.monitor import Timer
@@ -55,11 +57,16 @@ def get_loader(data, tokenizer, batch_size):
     return loader
 
 
-def test_model_fp32_seq_512(data, tokenizer, model_config):
+@pytest.mark.parametrize("model_config", ["base"],
+                         indirect=True)
+@pytest.mark.parametrize("data_512", ["books", "owt"],
+                         indirect=True)
+def test_model_fp32_seq_512(data_512, tokenizer, model_config):
     model, config, criterion = model_config
     batch_size = 64
     print(f"batch size is {batch_size}")
-    loader = get_loader(data, tokenizer, batch_size)
+    loader = get_loader(data_512, tokenizer, batch_size)
+    print("Got loader")
     iter = loader.__iter__()
     model.train()
     model = model.cuda(0)
@@ -73,11 +80,40 @@ def test_model_fp32_seq_512(data, tokenizer, model_config):
         return
 
 
-def test_model_fp16_seq_512(data, tokenizer, model_config):
+@pytest.mark.parametrize("model_config", ["base", "small", "tiny"],
+                         indirect=True)
+@pytest.mark.parametrize("data_128", ["books", "owt"],
+                         indirect=True)
+def test_model_fp32_seq_128(data_128, tokenizer, model_config):
     model, config, criterion = model_config
+    print(f"model is {model.model_name}")
+    batch_size = 64
+    print(f"batch size is {batch_size}")
+    loader = get_loader(data_128, tokenizer, batch_size)
+    print("Got loader")
+    iter = loader.__iter__()
+    model.train()
+    model = model.cuda(0)
+    optimizer = torch.optim.Adam(model.parameters())
+    try:
+        for _ in range(10):
+            with timer:
+                loop(iter, model, optimizer, criterion)
+            print(f"Loop time: {timer.time}")
+    except KeyboardInterrupt:
+        return
+
+
+@pytest.mark.parametrize("model_config", ["base"],
+                         indirect=True)
+@pytest.mark.parametrize("data_512", ["books", "owt"],
+                         indirect=True)
+def test_model_fp16_seq_512(data_512, tokenizer, model_config):
+    model, config, criterion = model_config
+    print(f"model is {model.model_name}")
     batch_size = 96
     print(f"batch size is {batch_size}")
-    loader = get_loader(data, tokenizer, batch_size)
+    loader = get_loader(data_512, tokenizer, batch_size)
     iter = loader.__iter__()
     model.train()
     model = model.half().cuda(0)
@@ -90,17 +126,16 @@ def test_model_fp16_seq_512(data, tokenizer, model_config):
     except KeyboardInterrupt:
         return
 
-
+@pytest.mark.parametrize("model_config", ["base"],
+                         indirect=True)
+@pytest.mark.parametrize("data_128", ["books", "owt"],
+                         indirect=True)
 def test_model_fp16_seq_128(tokenizer, model_config):
-    with timer:
-        data = dataloader.BertDataset("books-wiki-tokenized", False,
-                                      max_seq_len=128, min_seq_len=30,
-                                      truncate_strategy="truncate_second")
-    print(f"Loaded data in {timer.time}")
     model, config, criterion = model_config
+    print(f"model is {model.model_name}")
     batch_size = 512
     print(f"batch size is {batch_size}")
-    loader = get_loader(data, tokenizer, batch_size)
+    loader = get_loader(data_128, tokenizer, batch_size)
     iter = loader.__iter__()
     model.train()
     model = model.half().cuda(0)

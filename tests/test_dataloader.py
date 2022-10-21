@@ -9,11 +9,34 @@ from common_pyutil.monitor import Timer
 timer = Timer()
 
 
-def test_dataloader(data, tokenizer):
+def test_dataloader_books(data_books, tokenizer):
     batch_size = 32
+    data = data_books
     inds = np.arange(len(data))
     batch_inds = np.random.choice(inds, batch_size)
     batch = [data[i] for i in batch_inds]
+    collated = dataloader.mlm_collator(batch, 8, tokenizer)
+    assert collated['input_ids'].shape[1] <= 512
+    lengths = np.array([x.shape[1] for x in collated.values() if len(x.shape) == 2])
+    assert np.all(lengths == lengths[0])
+
+    collate_fn = partial(dataloader.mlm_collator, seq_align_len=8, tokenizer=tokenizer)
+    loader = torch.utils.data.DataLoader(data, shuffle=False,
+                                         num_workers=32, drop_last=False,
+                                         pin_memory=True, batch_size=batch_size,
+                                         collate_fn=collate_fn)
+    batch = loader.__iter__().__next__()
+    assert batch['input_ids'].shape[1] <= 512
+    lengths = np.array([x.shape[1] for x in batch.values() if len(x.shape) == 2])
+    assert np.all(lengths == lengths[0])
+
+
+def test_dataloader_owt(data_owt, tokenizer):
+    batch_size = 32
+    data = data_owt
+    inds = np.arange(len(data))
+    batch_inds = np.random.choice(inds, batch_size)
+    batch = [data[int(i)] for i in batch_inds]
     collated = dataloader.mlm_collator(batch, 8, tokenizer)
     assert collated['input_ids'].shape[1] <= 512
     lengths = np.array([x.shape[1] for x in collated.values() if len(x.shape) == 2])

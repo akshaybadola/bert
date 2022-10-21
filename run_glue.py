@@ -386,6 +386,15 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
+    # from models.bert import modeling
+    # config_file = "./configs/bert_base.json"
+    # config_alt = modeling.BertConfig.from_json_file(config_file)
+    # # Padding for divisibility by 8
+    # if config.vocab_size % 8 != 0:
+    #     config.vocab_size += 8 - (config.vocab_size % 8)
+    # model_old = model
+    # model = modeling.BertForSequenceClassification(config)
+    # model.config = model_old.config
 
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
@@ -716,7 +725,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpus")
     parser.add_argument("--model_name_or_path")
-    parser.add_argument("--eval_batch_size", type=int, default=512)
+    parser.add_argument("--train_batch_size", type=int)
+    parser.add_argument("--eval_batch_size", type=int)
     parser.add_argument("--train_only", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--train_and_eval", action="store_true")
@@ -733,15 +743,20 @@ if __name__ == "__main__":
         # tasks = ['cola', 'sst2', 'mnli', 'mrpc', 'stsb', 'qqp', 'qnli', 'rte', 'wnli', 'ax']
     if args.gpus:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+    else:
+        raise ValueError("gpus is required. Do not pass in environment variable as that's redundant")
     for task in tasks:
         training_args = default_training_args()
         setattr(training_args, "output_dir", f"{task}_saves")
+        if args.train_batch_size:
+            setattr(training_args, "per_device_train_batch_size", args.train_batch_size)
+        if args.eval_batch_size:
+            setattr(training_args, "per_device_eval_batch_size", args.eval_batch_size)
         if args.eval_only:
             delattr(training_args, "do_train")
             if args.model_name_or_path:
                 print("model_path will be overwritten for eval_only")
             setattr(training_args, "model_name_or_path", f"{task}_saves")
-            setattr(training_args, "per_device_eval_batch_size", args.eval_batch_size)
         elif args.train_only or args.train_and_eval:
             if args.model_name_or_path:
                 setattr(training_args, "model_name_or_path", args.model_name_or_path)

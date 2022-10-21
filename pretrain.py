@@ -197,13 +197,13 @@ def main():
     if args.dataset == "bookswiki":
         loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
                                        shuffle=not args.testing, max_seq_len=max_seq_len,
-                                       min_seq_len=30, truncate_stragety="truncate_second")
+                                       min_seq_len=30, truncate_strategy="truncate_second")
     elif args.dataset == "owt":
         if args.train_strategy == "epoch" and args.dataset == "owt":
             raise ValueError("Epoch wise training not supported with OWT")
         loader = get_owt_loader(max_steps * 256, loader_batch_size, args.num_workers, 8,
                                 max_seq_len=max_seq_len,
-                                min_seq_len=30, truncate_stragety="truncate_second")
+                                min_seq_len=30, truncate_strategy="truncate_second")
     optimizer, lr_scheduler, grad_scaler = get_optimizer(args.optimizer,
                                                          model, devices, warmup_proportion,
                                                          max_steps, learning_rate,
@@ -229,8 +229,11 @@ def main():
     torch.autograd.set_detect_anomaly(True)
     trainer_params = {"gpus": devices, "cuda": True,
                       "seed": args.seed, "resume": True,
+                      "use_prefetch": args.use_prefetch,
                       "metrics": ["loss", "scaled_loss", "total"], "val_frequency": 1,
-                      "test_frequency": 5, "log_frequency": 5, "max_epochs": num_epochs}
+                      "test_frequency": 5,
+                      "log_frequency": 1 if args.testing else 5,
+                      "max_epochs": num_epochs}
     trainer_name = "bert_trainer_" + ("phase2" if phase2 else "phase1")
     data = {"name": args.dataset, "train": loader.dataset}
     trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
@@ -251,9 +254,9 @@ def main():
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
     # 2. Save on steps instead of epochs (maybe)
-    import ipdb; ipdb.set_trace()
-    trainer.test_loops(200)
-    # trainer.train()
+    # trainer.test_loops(20)
+    # import ipdb; ipdb.set_trace()
+    trainer.train()
 
 
 if __name__ == '__main__':
