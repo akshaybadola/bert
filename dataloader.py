@@ -67,10 +67,13 @@ class BertDatasetOWT(torch.utils.data.Dataset):
     """
 
     def __init__(self, location, tokenizer, whole_word_mask=True, max_seq_len=128,
-                 min_seq_len=30, truncate_strategy="truncate_second"):
+                 min_seq_len=30, truncate_strategy="truncate_second",
+                 selection=None):
         if not whole_word_mask:
             raise NotImplementedError("Only whole word masking is implemented right now")
         self.data = datasets.load_from_disk(location)
+        if selection is not None:
+            self.data = self.data.select(selection)
         self.tokenizer = tokenizer
         self.inds = np.arange(len(self.data))
         self.max_ind = len(self.inds)
@@ -83,23 +86,23 @@ class BertDatasetOWT(torch.utils.data.Dataset):
     def __getitem__(self, i):
         output = {}
         with timer:
-            doc_a = self.data[i]
+            doc_a = self.data[int(self.inds[i])]
             token_lines = doc_a['tokens']
-            if not len(token_lines):
-                while not len(token_lines):
-                    ind_a = np.random.randint(self.max_ind)
-                    doc_a = self.data[ind_a]
-                    token_lines = doc_a['tokens']
+            # if not len(token_lines):
+            #     while not len(token_lines):
+            #         ind_a = np.random.randint(self.max_ind)
+            #         doc_a = self.data[ind_a]
+            #         token_lines = doc_a['tokens']
             if len(token_lines) == 1:
                 ind = int(np.random.randint(self.max_ind))
                 ind_a = 0
                 words_a = token_lines[ind_a]
                 token_ids_a = doc_a['input_ids'][ind_a]
                 doc_b = self.data[ind]
-                if not len(doc_b['tokens']):
-                    while not len(doc_b['tokens']):
-                        ind = int(np.random.randint(self.max_ind))
-                        doc_b = self.data[ind]
+                # if not len(doc_b['tokens']):
+                #     while not len(doc_b['tokens']):
+                #         ind = int(np.random.randint(self.max_ind))
+                #         doc_b = self.data[ind]
                 ind_b = np.random.choice(len(doc_b['tokens']))
                 words_b = doc_b['tokens'][ind_b]
                 token_ids_b = doc_b['input_ids'][ind_b]
@@ -113,10 +116,10 @@ class BertDatasetOWT(torch.utils.data.Dataset):
                 else:
                     ind = int(np.random.randint(self.max_ind))
                     doc_b = self.data[ind]
-                    if not len(doc_b['tokens']):
-                        while not len(doc_b['tokens']):
-                            ind = int(np.random.randint(self.max_ind))
-                            doc_b = self.data[ind]
+                    # if not len(doc_b['tokens']):
+                    #     while not len(doc_b['tokens']):
+                    #         ind = int(np.random.randint(self.max_ind))
+                    #         doc_b = self.data[ind]
                     ind_a = np.random.randint(len(token_lines))
                     words_a = token_lines[ind_a]
                     token_ids_a = doc_a['input_ids'][ind_a]
@@ -490,7 +493,7 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0, mask_whole_words=F
     # if isinstance(batch, tuple):
     #     batch = batch[0]
     output = {x: None for x in ["input_ids", "token_type_ids", "attention_mask",
-                                "masked_lm_labels", "next_sentence_labels"]}
+                                "labels", "next_sentence_labels"]}
     lengths = [len(x['input_ids']) for x in batch]
     batch_size = len(batch)
     max_len = max(lengths)
@@ -516,13 +519,13 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0, mask_whole_words=F
                 split_range_tensor[i, :x['split_range'].max()] = x['split_range']
             next_sentence_labels.append(x['next_sentence_label'])
         if mask_whole_words:
-            output["input_ids"], output["masked_lm_labels"] = _mask_whole_words(
+            output["input_ids"], output["labels"] = _mask_whole_words(
                 input_tensor, tokenizer=tokenizer,
                 special_tokens_mask=special_tokens_mask_tensor,
                 split_tokens=split_tokens_tensor,
                 split_range=split_range_tensor)
         else:
-            output["input_ids"], output["masked_lm_labels"] = _mask_tokens(
+            output["input_ids"], output["labels"] = _mask_tokens(
                 input_tensor, tokenizer=tokenizer,
                 special_tokens_mask=special_tokens_mask_tensor)
         output["attention_mask"] = mask_tensor
@@ -553,7 +556,8 @@ def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
 
 
 def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
-                   max_seq_len=None, min_seq_len=None, truncate_strategy=None):
+                   max_seq_len=None, min_seq_len=None, truncate_strategy=None,
+                   filter_length=0):
     if max_seq_len is None:
         raise ValueError("max_seq_len cannot be None")
     mask_whole_words = True
@@ -562,8 +566,11 @@ def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
     collate_fn = partial(mlm_collator, seq_align_len=seq_align_len,
                          tokenizer=tokenizer, mask_whole_words=mask_whole_words)
+    lengths = np.load("owt_lengths.npz")["arr_0"]
+    selection = np.where(lengths > filter_length)[0]
     data = BertDatasetOWT("owt-filtered-with-tokens", tokenizer, max_seq_len=max_seq_len,
-                          min_seq_len=min_seq_len, truncate_strategy=truncate_strategy)
+                          min_seq_len=min_seq_len, truncate_strategy=truncate_strategy,
+                          selection=selection)
     sampler = torch.utils.data.RandomSampler(data, replacement=True,
                                              num_samples=num_train_examples)
     loader = torch.utils.data.DataLoader(data, sampler=sampler,

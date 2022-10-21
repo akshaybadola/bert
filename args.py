@@ -13,6 +13,9 @@ def parse_arguments():
     parser.add_argument("--dataset", required=True)
 
     # Other parameters
+    parser.add_argument("--no_next_sentence_prediction", dest="next_sentence_prediction",
+                        action="store_false")
+    parser.add_argument("--device_batch_size_phase1", type=int)
     parser.add_argument("--train_strategy", default="epoch", help="One of [epochs, steps]")
     parser.add_argument("--use_prefetch", action="store_true")
     parser.add_argument("--train_config_file", required=True,

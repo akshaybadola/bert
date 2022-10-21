@@ -4,7 +4,10 @@ import json
 import math
 from functools import partial
 
+import numpy as np
+
 import torch
+import transformers
 
 import args as Args
 from models.bert import modeling
@@ -19,6 +22,9 @@ from simple_trainer import functions
 
 def dict_to(tensors, device):
     return {k: v.to(device) for k, v in tensors.items()}
+
+
+custom_model = True
 
 
 class BertUpdateFunction(SimpleUpdateFunction):
@@ -44,13 +50,21 @@ class BertUpdateFunction(SimpleUpdateFunction):
     def __call__(self, batch, criterion, model, optimizer, **kwargs):
         batch = {k: model.to_(v) for k, v in batch.items()}
         with torch.cuda.amp.autocast(enabled=True):
-            prediction_scores, seq_relationship_score = model(input_ids=batch['input_ids'],
-                                                              token_type_ids=batch['token_type_ids'],
-                                                              attention_mask=batch['attention_mask'],
-                                                              masked_lm_labels=batch['masked_lm_labels'])
-            loss = criterion(prediction_scores, seq_relationship_score,
-                             batch['masked_lm_labels'],
-                             batch['next_sentence_labels'])
+            if custom_model:
+                prediction_scores, seq_relationship_score = model(input_ids=batch['input_ids'],
+                                                                  token_type_ids=batch['token_type_ids'],
+                                                                  attention_mask=batch['attention_mask'],
+                                                                  masked_lm_labels=batch['labels'])
+                loss = criterion(prediction_scores, seq_relationship_score,
+                                 batch['labels'], batch['next_sentence_labels'])
+            else:
+                outputs = model(input_ids=batch['input_ids'],
+                                token_type_ids=batch['token_type_ids'],
+                                attention_mask=batch['attention_mask'],
+                                labels=batch['labels'])
+                loss = criterion(outputs['prediction_logits'], outputs['seq_relationship_logits'],
+                                 batch['labels'],
+                                 batch['next_sentence_labels'])
             loss = loss / self._grad_accumulation_steps
         scaled_loss = self._grad_scaler.scale(loss)
         scaled_loss.backward()
@@ -73,31 +87,45 @@ class BertPretrainingCriterion(torch.nn.Module):
 
     sequence_output_is_dense: Final[bool]
 
-    def __init__(self, vocab_size, sequence_output_is_dense=False):
-        super(BertPretrainingCriterion, self).__init__()
+    def __init__(self, vocab_size, sequence_output_is_dense=False, nsp=True):
+        super().__init__()
         self.loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-1)
         self.vocab_size = vocab_size
         self.sequence_output_is_dense = sequence_output_is_dense
+        self.nsp = nsp
 
-    def forward(self, prediction_scores, seq_relationship_score, masked_lm_labels, next_sentence_labels):
+    def forward(self, prediction_scores, seq_relationship_score, masked_lm_labels,
+                next_sentence_labels=None):
         if self.sequence_output_is_dense:
             # prediction_scores are already dense
             masked_lm_labels_flat = masked_lm_labels.view(-1)
             mlm_labels = masked_lm_labels_flat[masked_lm_labels_flat != -1]
             masked_lm_loss = self.loss_fn(prediction_scores.view(-1, self.vocab_size), mlm_labels.view(-1))
         else:
-            masked_lm_loss = self.loss_fn(prediction_scores.view(-1, self.vocab_size), masked_lm_labels.view(-1))
-        next_sentence_loss = self.loss_fn(seq_relationship_score.view(-1, 2), next_sentence_labels.view(-1))
-        total_loss = masked_lm_loss + next_sentence_loss
-        return total_loss
+            masked_lm_loss = self.loss_fn(prediction_scores.view(-1, self.vocab_size),
+                                          masked_lm_labels.view(-1))
+        if self.nsp:
+            next_sentence_loss = self.loss_fn(seq_relationship_score.view(-1, 2),
+                                              next_sentence_labels.view(-1))
+            total_loss = masked_lm_loss + next_sentence_loss
+            return total_loss
+        else:
+            return masked_lm_loss
 
 
-def get_model_and_config(model_name, config_file, sequence_output_is_dense):
-    config = modeling.BertConfig.from_json_file(config_file)
+def get_model_and_config(model_name, config_file, sequence_output_is_dense=True):
+    if custom_model:
+        config = modeling.BertConfig.from_json_file(config_file)
+    else:
+        config = transformers.BertConfig.from_json_file(config_file)
     # Padding for divisibility by 8
     if config.vocab_size % 8 != 0:
         config.vocab_size += 8 - (config.vocab_size % 8)
-    model = modeling.BertForPreTraining(config, sequence_output_is_dense=sequence_output_is_dense)
+    if custom_model:
+        model = modeling.BertForPreTraining(config,
+                                            sequence_output_is_dense=sequence_output_is_dense)
+    else:
+        model = transformers.models.bert.BertForPreTraining(config)
     return model, config
 
 
@@ -158,8 +186,7 @@ def main():
         elif k not in args.__dict__:
             args.__dict__[k] = v
     sequence_output_is_dense = args.dense_sequence_output
-    model, config = get_model_and_config(args.model_name, args.model_config_file,
-                                         sequence_output_is_dense)
+    model, config = get_model_and_config(args.model_name, args.model_config_file)
     model.model_name = args.model_name
 
     # NOTE: For DataParallel, for DDP a different approach will have to be used
@@ -221,7 +248,8 @@ def main():
     elif args.train_strategy == "steps":
         num_epochs = 1
     criterion = BertPretrainingCriterion(config.vocab_size,
-                                         sequence_output_is_dense=sequence_output_is_dense)
+                                         sequence_output_is_dense=custom_model,
+                                         nsp=args.next_sentence_prediction)
 
     update_function = BertUpdateFunction(grad_scaler, lr_scheduler,
                                          args.gradient_accumulation_steps)
@@ -239,7 +267,8 @@ def main():
     trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
                       {"train": loader}, update_function, criterion,
                       args.savedir, args.logdir, ddp_params={},
-                      extra_opts={"args": args.__dict__})
+                      extra_opts={"args": args.__dict__,
+                                  "model_config": config.to_dict()})
     trainer._grad_scaler = grad_scaler
     # trainer.save_optimizer = lambda : None
     trainer.save_extra = lambda self: {"grad_scaler": self._grad_scaler.state_dict()}
@@ -248,15 +277,16 @@ def main():
     if not any("post_batch_progress" in x for x in desc):
         trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
     # trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
-    _save_checkpoint = partial(functions.post_batch_save_checkpoint, num_iters=10000)
-    trainer.add_to_hook_at_end("post_batch_hook", lambda self, **kwargs: _save_checkpoint)
+    _save_checkpoint = partial(functions.post_batch_save_checkpoint, batch_num_for_saving=10000)
+    trainer.add_to_hook_at_end("post_batch_hook", _save_checkpoint)
     # TODO:
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
     # 2. Save on steps instead of epochs (maybe)
-    # trainer.test_loops(20)
-    # import ipdb; ipdb.set_trace()
-    trainer.train()
+    if args.testing:
+        trainer.test_loops(200)
+    else:
+        trainer.train()
 
 
 if __name__ == '__main__':
