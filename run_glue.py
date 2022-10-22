@@ -206,17 +206,40 @@ class ModelArguments:
     )
 
 
+@dataclass
+class CustomArgs:
+    """
+    Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
+    """
+
+    custom_model: bool = field(
+        default=False,
+        metadata={"help": "Use custom model rather than HF"}
+    )
+    custom_weights: Optional[str] = field(
+        default=None,
+        metadata={"help": "Custom model weights file"}
+    )
+    custom_config: Optional[str] = field(
+        default=None,
+        metadata={"help": "Custom model config file"}
+    )
+
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments,
+                               TrainingArguments, CustomArgs))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, custom_args =\
+            parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, custom_args =\
+            parser.parse_args_into_dataclasses()
 
     # if data_args.task_name in ["stsb"]:
     #     training_args.num_train_epochs = 10.0
@@ -362,6 +385,8 @@ def main():
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
+    if custom_args.custom_model and custom_args.custom_config:
+        model_args.config_name = "bert-base-uncased"
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
@@ -377,24 +402,44 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-        ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
-    )
-    # from models.bert import modeling
-    # config_file = "./configs/bert_base.json"
-    # config_alt = modeling.BertConfig.from_json_file(config_file)
-    # # Padding for divisibility by 8
-    # if config.vocab_size % 8 != 0:
-    #     config.vocab_size += 8 - (config.vocab_size % 8)
-    # model_old = model
-    # model = modeling.BertForSequenceClassification(config)
-    # model.config = model_old.config
+    if custom_args.custom_model:
+        if not (custom_args.custom_config or custom_args.custom_weights):
+            raise AttributeError("custom config has to be given with custom model")
+        from models.bert import modeling
+        config_file = custom_args.custom_config
+        config_alt = modeling.BertConfig.from_json_file(config_file)
+        # Padding for divisibility by 8
+        if config.vocab_size % 8 != 0:
+            config.vocab_size += 8 - (config_alt.vocab_size % 8)
+        if config_alt.vocab_size % 8 != 0:
+            config_alt.vocab_size += 8 - (config_alt.vocab_size % 8)
+        config.__dict__.update(config_alt.to_dict())
+        model = modeling.BertForSequenceClassification(config)
+        import torch
+        if training_args.do_train:
+            state = torch.load(custom_args.custom_weights, map_location="cpu")
+            model.load_state_dict(state["model_state_dict"], strict=False)
+            print(f"Loaded weights for {custom_args.custom_config.split('.')[0]} " +
+                  f"from {custom_args.custom_weights}")
+        else:
+            weights_file = data_args.task_name + "_saves/pytorch_model.bin"
+            state = torch.load(weights_file, map_location="cpu")
+            model.load_state_dict(state)
+            print(f"Loaded weights for {custom_args.custom_config.split('.')[0]} " +
+                  f"from {weights_file}")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
+        print(model)
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+            ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
+        )
+
 
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
@@ -721,6 +766,15 @@ def make_train_args_list(training_args):
     return args
 
 
+def make_custom_args_list(custom_args):
+    args = []
+    for k in CustomArgs.__dataclass_fields__.keys():
+        if k in custom_args.__dict__:
+            args.append(f"--{k}")
+            args.append(f"{v}")
+    return args
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpus")
@@ -766,4 +820,6 @@ if __name__ == "__main__":
                 delattr(training_args, "do_eval")
         setattr(training_args, "task_name", task)
         sys.argv.extend(make_train_args_list(training_args))
+        sys.argv.extend(others)
         main()
+ 
