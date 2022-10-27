@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import json
 import math
 from functools import partial
+from pathlib import Path
 import os
 
 import numpy as np
@@ -140,13 +141,14 @@ def get_optimizer(optimizer_name, model, devices, warmup_proportion,
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}]
 
     if optimizer_name == "lamb":
+        device = torch.device(devices[0])
         optimizer = FusedLAMBAMP(optimizer_grouped_parameters,
-                                 lr=learning_rate)
+                                 lr=learning_rate, device=device)
         lr_scheduler = PolyWarmUpScheduler(optimizer,
                                            warmup=warmup_proportion,
                                            total_steps=max_steps,
                                            base_lr=learning_rate,
-                                           device=torch.device(devices[0]))
+                                           device=device)
     elif optimizer_name == "adam":
         optimizer = torch.optim.Adam(optimizer_grouped_parameters,
                                      lr=learning_rate)
@@ -178,16 +180,22 @@ def load_grad_scaler_and_scheduler(self, saved_state, num_iters=0):
     if "lr_scheduler" in saved_state:
         self._lr_scheduler.load_state_dict(saved_state["lr_scheduler"])
     else:
-        max_epochs = saved_state["params"]["max_epochs"]
-        if max_epochs == 1:
-            if num_iters:
-                for _ in range(num_iters):
-                    self._lr_scheduler.step()
-            else:
-                raise ValueError("Must specify num_iters when steps based training")   
+        if num_iters:
+            self._lr_scheduler.last_epoch = num_iters
         else:
-            for _ in range(len(self.dataloaders['train'])):
-                self._lr_scheduler.step()
+            max_epochs = saved_state["params"]["max_epochs"]
+            if max_epochs == 1:
+                raise ValueError("Must specify num_iters when steps based training")
+            else:
+                self._lr_scheduler.last_epoch = len(self.dataloaders["train"]) * (self.epoch+1)
+
+
+def dump_extra_opts(self, **kwargs):
+    if self.extra_opts:
+        self.logger.info("Dumping extra opts")
+        for k, v in self.extra_opts.items():
+            with open(os.path.join(self.savedir, f"{k}.json"), "w") as f:
+                json.dump(v, f)
 
 
 def main():
@@ -203,8 +211,6 @@ def main():
                 args.__dict__[k] = v
             elif k not in args.__dict__:
                 args.__dict__[k] = v
-    else:
-        args.__dict__.pop("resume_dir")
     sequence_output_is_dense = args.dense_sequence_output
     model, config = get_model_and_config(args.model_name, args.model_config_file)
     model.model_name = args.model_name
@@ -292,29 +298,39 @@ def main():
     savedir = "-".join([args.model_name.replace("_", "-"), args.dataset])
     if args.mask_whole_words:
         savedir += "-whole-words"
+    if args.savedir_suffix:
+        savedir += f"-{args.savedir_suffix}"
+    print(f"Output dir is {savedir}")
     trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
                       {"train": loader}, update_function, criterion,
-                      savedir, savedir, ddp_params={},
+                      savedir=savedir, logdir=savedir, ddp_params={},
                       extra_opts={"args": args.__dict__,
                                   "model_config": config.to_dict()})
     trainer._grad_scaler = grad_scaler
     trainer._lr_scheduler = lr_scheduler
     trainer.save_extra = lambda self: {"grad_scaler": self._grad_scaler.state_dict(),
-                                       "lr_schedulre": self._lr_scheduler.state_dict()}
+                                       "lr_scheduler": self._lr_scheduler.state_dict()}
     trainer.load_extra = lambda self, saved_state: load_grad_scaler_and_scheduler(self, saved_state)
     desc = trainer.describe_hook("post_batch_hook")
     if not any("post_batch_progress" in x for x in desc):
         trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
+    trainer.add_to_hook_at_end("post_batch_hook", partial(functions.update_metrics, quiet=True))
     if args.dataset == "books-wiki":
         trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
     _save_checkpoint = partial(functions.post_batch_save_checkpoint, batch_num_for_saving=10000)
     trainer.add_to_hook_at_end("post_batch_hook", _save_checkpoint)
+    trainer.add_to_hook_at_end("pre_training_hook", dump_extra_opts)
     # TODO:
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
     if args.testing:
-        trainer.test_loops(200)
+        trainer.test_loops(args.testing_iters)
     else:
+        files = [*filter(lambda x: x.endswith("pth"), os.listdir(savedir))]
+        if not any(f.startswith("checkpoint") for f in files):
+            files.sort()
+            if files:
+                trainer._resume_path = Path(f"{savedir}/{files[-1]}")
         trainer.try_resume()
         trainer.train()
 

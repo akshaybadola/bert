@@ -135,5 +135,7 @@ class PolyWarmUpScheduler(LRScheduler):
 
     def get_lr(self):
         progress = self.last_epoch / self.total_steps
-        lr_tensor = torch.where(progress < self.warmup, self.base_lr * progress / self.warmup, self.base_lr * ((1.0 - progress) ** self.degree))
+        lr_tensor = torch.where(progress < self.warmup,
+                                self.base_lr * progress / self.warmup,
+                                self.base_lr * ((1.0 - progress) ** self.degree))
         return [lr_tensor for _ in range(len(self.optimizer.param_groups))]

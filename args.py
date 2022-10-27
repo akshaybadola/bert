@@ -2,17 +2,20 @@ import os
 import json
 import sys
 import argparse
+from types import SimpleNamespace
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
 
     # Required parameters
+    # Either resume_dir or model, dataset and other configs are required
     parser.add_argument("--resume_dir", help="Resume training from directory")
     parser.add_argument("--model_name", help="The BERT model config")
     parser.add_argument("--model_config_file", help="The BERT model config")
     parser.add_argument("--dataset", help="dataset name, one of [books-wiki, owt]")
     parser.add_argument("--train_config_file", help="The training config")
+    parser.add_argument("--optimizer", help="Which optimizer to use. [adam, lamb]")
 
     # Other parameters
     parser.add_argument("--mask_whole_words", action="store_true")
@@ -21,8 +24,6 @@ def parse_arguments():
     parser.add_argument("--device_batch_size_phase1", type=int)
     parser.add_argument("--train_strategy", default="epoch", help="One of [epochs, steps]")
     parser.add_argument("--use_prefetch", action="store_true")
-    parser.add_argument("--optimizer", required=True,
-                        help="Which optimizer to use. [adam, lamb]")
     parser.add_argument("--max_predictions_per_seq",
                         default=80,
                         type=int,
@@ -115,6 +116,8 @@ def parse_arguments():
 
     # misc params
     parser.add_argument("--testing", action="store_true")
+    parser.add_argument("--testing_iters", type=int, default=100)
+    parser.add_argument("--savedir_suffix", help="Suffix to add to savedir")
 
     args = parser.parse_args()
     args.fp16 = args.fp16 or args.amp
@@ -127,12 +130,14 @@ def check_args(args):
             (args.model_name and
              args.model_config_file and
              args.dataset and
-             args.train_config_file)), "Either resume dir or config files must be given"
+             args.train_config_file and
+             args.optimizer)), "Either resume dir or config files must be given"
     if args.resume_dir:
         try:
             with open(os.path.join(args.resume_dir, "args.json")) as f:
                 _args = json.load(f)
-            return _args
+            _args["resume_dir"] = args.resume_dir
+            return SimpleNamespace(**_args)
         except FileNotFoundError("args.json not found in resume dir"):
             sys.exit(1)
     else:

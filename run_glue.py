@@ -224,6 +224,10 @@ class CustomArgs:
         default=None,
         metadata={"help": "Custom model config file"}
     )
+    custom_suffix: Optional[str] = field(
+        default=None,
+        metadata={"help": "prefix to attach to output dir"}
+    )
 
 
 def main():
@@ -277,7 +281,11 @@ def main():
 
     if custom_args.custom_model:
         model_name = os.path.basename(custom_args.custom_config).split('.')[0]
-        training_args.output_dir = os.path.join("_".join([model_name, "glue"]), data_args.task_name)
+        if custom_args.custom_suffix:
+            suffix = f"glue_{custom_args.custom_suffix}"
+        else:
+            suffix = "glue"
+        training_args.output_dir = os.path.join("_".join([model_name, suffix]), data_args.task_name)
         if not os.path.exists(training_args.output_dir):
             os.makedirs(training_args.output_dir)
     else:
