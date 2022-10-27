@@ -1,4 +1,6 @@
 import os
+import json
+import sys
 import argparse
 
 
@@ -6,20 +8,19 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
 
     # Required parameters
-    parser.add_argument("--model_name", required=True,
-                        help="The BERT model config")
-    parser.add_argument("--model_config_file", required=True,
-                        help="The BERT model config")
-    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--resume_dir", help="Resume training from directory")
+    parser.add_argument("--model_name", help="The BERT model config")
+    parser.add_argument("--model_config_file", help="The BERT model config")
+    parser.add_argument("--dataset", help="dataset name, one of [books-wiki, owt]")
+    parser.add_argument("--train_config_file", help="The training config")
 
     # Other parameters
+    parser.add_argument("--mask_whole_words", action="store_true")
     parser.add_argument("--no_next_sentence_prediction", dest="next_sentence_prediction",
                         action="store_false")
     parser.add_argument("--device_batch_size_phase1", type=int)
     parser.add_argument("--train_strategy", default="epoch", help="One of [epochs, steps]")
     parser.add_argument("--use_prefetch", action="store_true")
-    parser.add_argument("--train_config_file", required=True,
-                        help="The BERT model config")
     parser.add_argument("--optimizer", required=True,
                         help="Which optimizer to use. [adam, lamb]")
     parser.add_argument("--max_predictions_per_seq",
@@ -122,9 +123,22 @@ def parse_arguments():
 
 
 def check_args(args):
-    model_configs = [x.split(".json")[0] for x in 
-                     os.listdir(os.path.dirname(__file__) + "/configs")
-                     if ("train" not in x.split(".json")[0] and
-                         "eval" not in x.split(".json")[0])]
-    assert args.model_name in model_configs, f"Model name {args.model_name} not in configs"
+    assert (args.resume_dir or
+            (args.model_name and
+             args.model_config_file and
+             args.dataset and
+             args.train_config_file)), "Either resume dir or config files must be given"
+    if args.resume_dir:
+        try:
+            with open(os.path.join(args.resume_dir, "args.json")) as f:
+                _args = json.load(f)
+            return _args
+        except FileNotFoundError("args.json not found in resume dir"):
+            sys.exit(1)
+    else:
+        model_configs = [x.split(".json")[0] for x in 
+                         os.listdir(os.path.dirname(__file__) + "/configs")
+                         if ("train" not in x.split(".json")[0] and
+                             "eval" not in x.split(".json")[0])]
+        assert args.model_name in model_configs, f"Model name {args.model_name} not in configs"
     return args

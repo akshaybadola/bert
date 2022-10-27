@@ -82,6 +82,15 @@ class BertDatasetOWT(torch.utils.data.Dataset):
         self.min_seq_len = min_seq_len
         self.cls = self.tokenizer.cls_token_id
         self.sep = self.tokenizer.sep_token_id
+        self._whole_word_mask = whole_word_mask
+
+    @property
+    def whole_word_mask(self):
+        return self._whole_word_mask
+
+    @whole_word_mask.setter
+    def whole_word_mask(self, x):
+        raise AttributeError("Cannot set attribute whole_word_mask after initialization")
 
     def __getitem__(self, i):
         output = {}
@@ -218,6 +227,19 @@ class BertDatasetBooksWiki(torch.utils.data.Dataset):
         if shuffle:
             print("Shuffling dataset")
             np.random.shuffle(self.inds)
+        self._whole_word_mask = whole_word_mask
+        if whole_word_mask:
+            print("Whole word masking is ENABLED in Books-Wiki")
+        else:
+            print("Whole word masking is DISABLED in Books-Wiki")            
+
+    @property
+    def whole_word_mask(self):
+        return self._whole_word_mask
+
+    @whole_word_mask.setter
+    def whole_word_mask(self, x):
+        raise AttributeError("Cannot set attribute whole_word_mask after initialization")
 
     def reset(self):
         np.random.shuffle(self.inds)
@@ -237,42 +259,44 @@ class BertDatasetBooksWiki(torch.utils.data.Dataset):
         with timer:
             limit_a, limit_b = get_limits(len_a, len_b, self.max_seq_len - 3,
                                           self.min_seq_len, self.truncate_strategy)  # 3 special tokens
-            if "tokens" in sent_a:
-                words_a = sent_a['tokens'][:limit_a]
-                words_b = sent_b['tokens'][:limit_b]
-            else:
-                words_a = self.tokenizer.tokenize(sent_a['text'])[:limit_a]
-                words_b = self.tokenizer.tokenize(sent_b['text'])[:limit_b]
             output = {}
-            split_a = []
-            split_b = []
-            i = 1
-            j = 1
-            for x in words_a:
-                if x.startswith("#"):
-                    split_a.append(j)
+            if self.whole_word_mask:
+                if "tokens" in sent_a:
+                    words_a = sent_a['tokens'][:limit_a]
+                    words_b = sent_b['tokens'][:limit_b]
                 else:
-                    split_a.append(i)
-                    j = i
-                    i += 1
-            i = 1
-            j = 1
-            for x in words_b:
-                if x.startswith("#"):
-                    split_b.append(j)
-                else:
-                    split_b.append(i)
-                    j = i
-                    i += 1
+                    words_a = self.tokenizer.tokenize(sent_a['text'])[:limit_a]
+                    words_b = self.tokenizer.tokenize(sent_b['text'])[:limit_b]
+                split_a = []
+                split_b = []
+                i = 1
+                j = 1
+                for x in words_a:
+                    if x.startswith("#"):
+                        split_a.append(j)
+                    else:
+                        split_a.append(i)
+                        j = i
+                        i += 1
+                i = 1
+                j = 1
+                for x in words_b:
+                    if x.startswith("#"):
+                        split_b.append(j)
+                    else:
+                        split_b.append(i)
+                        j = i
+                        i += 1
         time_b = timer.time
         # output['split_mask'] = torch.as_tensor([0, *[1 if x.startswith("#") else 0
         #                                              for x in words_a],
         #                                         0, *[1 if x.startswith("#") else 0
         #                                              for x in words_b], 0])
         with timer:
-            output['split_tokens'] = torch.as_tensor([0, *split_a, 0,
-                                                      *(torch.as_tensor(split_b) + max(split_a)), 0])
-            output['split_range'] = torch.arange(1, output['split_tokens'].max()+1)
+            if self.whole_word_mask:
+                output['split_tokens'] = torch.as_tensor([0, *split_a, 0,
+                                                          *(torch.as_tensor(split_b) + max(split_a)), 0])
+                output['split_range'] = torch.arange(1, output['split_tokens'].max()+1)
             output["input_ids"] = torch.as_tensor([self.cls,
                                                    *sent_a['input_ids'][:limit_a], self.sep,
                                                    *sent_b['input_ids'][:limit_b], self.sep],
@@ -536,10 +560,9 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0, mask_whole_words=F
 
 def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
                           max_seq_len=None, min_seq_len=None,
-                          truncate_strategy=None):
+                          truncate_strategy=None, mask_whole_words=True):
     if max_seq_len is None:
         raise ValueError("max_seq_len cannot be None")
-    mask_whole_words = True
     if mask_whole_words:
         print("Whole word masking is on")
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
@@ -547,7 +570,8 @@ def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
                          tokenizer=tokenizer, mask_whole_words=mask_whole_words)
     data = BertDatasetBooksWiki("books-wiki-tokenized-with-tokens", tokenizer,
                                 shuffle=shuffle, max_seq_len=max_seq_len,
-                                min_seq_len=min_seq_len, truncate_strategy=truncate_strategy)
+                                min_seq_len=min_seq_len, truncate_strategy=truncate_strategy,
+                                whole_word_mask=mask_whole_words)
     loader = torch.utils.data.DataLoader(data, shuffle=False,
                                          num_workers=num_workers, drop_last=False,
                                          pin_memory=True, batch_size=batch_size,
@@ -557,7 +581,7 @@ def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
 
 def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
                    max_seq_len=None, min_seq_len=None, truncate_strategy=None,
-                   filter_length=0):
+                   filter_length=0, mask_whole_words=True):
     if max_seq_len is None:
         raise ValueError("max_seq_len cannot be None")
     mask_whole_words = True
@@ -568,8 +592,10 @@ def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
                          tokenizer=tokenizer, mask_whole_words=mask_whole_words)
     lengths = np.load("owt_lengths.npz")["arr_0"]
     selection = np.where(lengths > filter_length)[0]
-    data = BertDatasetOWT("owt-filtered-with-tokens", tokenizer, max_seq_len=max_seq_len,
-                          min_seq_len=min_seq_len, truncate_strategy=truncate_strategy,
+    data = BertDatasetOWT("owt-filtered-with-tokens", tokenizer,
+                          whole_word_mask=mask_whole_words,
+                          max_seq_len=max_seq_len, min_seq_len=min_seq_len,
+                          truncate_strategy=truncate_strategy,
                           selection=selection)
     sampler = torch.utils.data.RandomSampler(data, replacement=True,
                                              num_samples=num_train_examples)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import json
 import math
 from functools import partial
+import os
 
 import numpy as np
 
@@ -11,7 +12,7 @@ import transformers
 
 import args as Args
 from models.bert import modeling
-from schedulers import PolyWarmUpScheduler
+from schedulers import LinearWarmUpScheduler, PolyWarmUpScheduler
 from lamb_amp_opt.fused_lamb import FusedLAMBAMP
 
 from dataloader import get_wiki_books_loader, get_owt_loader
@@ -141,16 +142,19 @@ def get_optimizer(optimizer_name, model, devices, warmup_proportion,
     if optimizer_name == "lamb":
         optimizer = FusedLAMBAMP(optimizer_grouped_parameters,
                                  lr=learning_rate)
+        lr_scheduler = PolyWarmUpScheduler(optimizer,
+                                           warmup=warmup_proportion,
+                                           total_steps=max_steps,
+                                           base_lr=learning_rate,
+                                           device=torch.device(devices[0]))
     elif optimizer_name == "adam":
         optimizer = torch.optim.Adam(optimizer_grouped_parameters,
                                      lr=learning_rate)
+        lr_scheduler = LinearWarmUpScheduler(optimizer,
+                                             warmup=warmup_proportion,
+                                             total_steps=max_steps)
     else:
         raise ValueError(f"Unknown optmizer {optimizer_name}")
-    lr_scheduler = PolyWarmUpScheduler(optimizer,
-                                       warmup=warmup_proportion,
-                                       total_steps=max_steps,
-                                       base_lr=learning_rate,
-                                       device=torch.device(devices[0]))
     grad_scaler = torch.cuda.amp.GradScaler(init_scale=init_loss_scale, enabled=True)
     return optimizer, lr_scheduler, grad_scaler
 
@@ -169,22 +173,38 @@ def resume_optimizer(optimizer, checkpoint, phase1, phase2_from_scratch,
     optimizer.load_state_dict(checkpoint['optimizer'])  # , strict=False)
 
 
-def load_grad_scaler(self, saved_state):
+def load_grad_scaler_and_scheduler(self, saved_state, num_iters=0):
     self._grad_scaler.load_state_dict(saved_state["grad_scaler"])
+    if "lr_scheduler" in saved_state:
+        self._lr_scheduler.load_state_dict(saved_state["lr_scheduler"])
+    else:
+        max_epochs = saved_state["params"]["max_epochs"]
+        if max_epochs == 1:
+            if num_iters:
+                for _ in range(num_iters):
+                    self._lr_scheduler.step()
+            else:
+                raise ValueError("Must specify num_iters when steps based training")   
+        else:
+            for _ in range(len(self.dataloaders['train'])):
+                self._lr_scheduler.step()
 
 
 def main():
     args = Args.parse_arguments()
-    if args.train_config_file:
-        with open(args.train_config_file) as f:
-            default_config = SimpleNamespace(**json.load(f))
+    if not args.resume_dir:
+        if args.train_config_file:
+            with open(args.train_config_file) as f:
+                default_config = SimpleNamespace(**json.load(f))
+        else:
+            default_config = SimpleNamespace()
+        for k, v in default_config.__dict__.items():
+            if k in args.__dict__ and not args.__dict__[k]:
+                args.__dict__[k] = v
+            elif k not in args.__dict__:
+                args.__dict__[k] = v
     else:
-        default_config = SimpleNamespace()
-    for k, v in default_config.__dict__.items():
-        if k in args.__dict__ and not args.__dict__[k]:
-            args.__dict__[k] = v
-        elif k not in args.__dict__:
-            args.__dict__[k] = v
+        args.__dict__.pop("resume_dir")
     sequence_output_is_dense = args.dense_sequence_output
     model, config = get_model_and_config(args.model_name, args.model_config_file)
     model.model_name = args.model_name
@@ -193,14 +213,14 @@ def main():
     if args.start_phase2 or args.resume_phase2:
         max_seq_len = args.max_seq_len_phase2
         device_batch_size = args.device_batch_size_phase2
-        max_steps = args.train_steps_phase2
+        num_datapoints = args.train_steps_phase2 * 256
         warmup_proportion = args.warmup_steps_phase2 / args.train_steps_phase2
         learning_rate = args.learning_rate_phase2
         phase2 = True
     else:
         device_batch_size = args.device_batch_size_phase1
         max_seq_len = args.max_seq_len_phase1
-        max_steps = args.train_steps_phase1
+        num_datapoints = args.train_steps_phase1 * 256
         warmup_proportion = args.warmup_steps_phase1 / args.train_steps_phase1
         learning_rate = args.learning_rate_phase1
         phase2 = False
@@ -210,7 +230,6 @@ def main():
         devices = [*map(int, args.devices.split(","))]
     model = model.cuda(devices[0])
     loader_batch_size = device_batch_size * len(devices)
-
     # NOTE: Effective train_batch_size is:
     #       (device_batch_size * num_devices) * gradient_accumulation_steps
     #       For dataparallel we fetch loader_batch_size (device_batch_size * num_devices)
@@ -220,17 +239,23 @@ def main():
     if args.gradient_accumulation_steps > 1:
         effective_batch_size = loader_batch_size * len(devices) * args.gradient_accumulation_steps
         print(f"loader_batch_size is {loader_batch_size}")
-        print(f"Effective batch size is {effective_batch_size}")
-    if args.dataset == "bookswiki":
+        print(f"Effective batch size for large batch training is {effective_batch_size}")
+    if args.dataset == "books-wiki":
         loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
                                        shuffle=not args.testing, max_seq_len=max_seq_len,
-                                       min_seq_len=30, truncate_strategy="truncate_second")
+                                       min_seq_len=30, truncate_strategy="truncate_second",
+                                       mask_whole_words=args.mask_whole_words)
+        max_steps = math.ceil(num_datapoints / len(loader.dataset) * len(loader))
     elif args.dataset == "owt":
         if args.train_strategy == "epoch" and args.dataset == "owt":
             raise ValueError("Epoch wise training not supported with OWT")
-        loader = get_owt_loader(max_steps * 256, loader_batch_size, args.num_workers, 8,
+        loader = get_owt_loader(num_datapoints, loader_batch_size, args.num_workers, 8,
                                 max_seq_len=max_seq_len,
-                                min_seq_len=30, truncate_strategy="truncate_second")
+                                min_seq_len=30, truncate_strategy="truncate_second",
+                                mask_whole_words=args.mask_whole_words)
+        max_steps = len(loader)
+    else:
+        raise ValueError(f"Unknown dataset {args.dataset}")
     optimizer, lr_scheduler, grad_scaler = get_optimizer(args.optimizer,
                                                          model, devices, warmup_proportion,
                                                          max_steps, learning_rate,
@@ -244,7 +269,7 @@ def main():
         raise ValueError(f"Unknown optmizer {args.optimizer}")
 
     if args.train_strategy == "epoch":
-        num_epochs = math.ceil(max_steps * 256 / len(loader) / loader.batch_size)
+        num_epochs = math.ceil(max_steps / len(loader))
     elif args.train_strategy == "steps":
         num_epochs = 1
     criterion = BertPretrainingCriterion(config.vocab_size,
@@ -264,28 +289,33 @@ def main():
                       "max_epochs": num_epochs}
     trainer_name = "bert_trainer_" + ("phase2" if phase2 else "phase1")
     data = {"name": args.dataset, "train": loader.dataset}
+    savedir = "-".join([args.model_name.replace("_", "-"), args.dataset])
+    if args.mask_whole_words:
+        savedir += "-whole-words"
     trainer = Trainer(trainer_name, trainer_params, optimizer, model, data,
                       {"train": loader}, update_function, criterion,
-                      args.savedir, args.logdir, ddp_params={},
+                      savedir, savedir, ddp_params={},
                       extra_opts={"args": args.__dict__,
                                   "model_config": config.to_dict()})
     trainer._grad_scaler = grad_scaler
-    # trainer.save_optimizer = lambda : None
-    trainer.save_extra = lambda self: {"grad_scaler": self._grad_scaler.state_dict()}
-    trainer.load_extra = lambda self, saved_state: load_grad_scaler(self, saved_state)
+    trainer._lr_scheduler = lr_scheduler
+    trainer.save_extra = lambda self: {"grad_scaler": self._grad_scaler.state_dict(),
+                                       "lr_schedulre": self._lr_scheduler.state_dict()}
+    trainer.load_extra = lambda self, saved_state: load_grad_scaler_and_scheduler(self, saved_state)
     desc = trainer.describe_hook("post_batch_hook")
     if not any("post_batch_progress" in x for x in desc):
         trainer.add_to_hook_at_end("post_batch_hook", functions.post_batch_progress)
-    # trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
+    if args.dataset == "books-wiki":
+        trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
     _save_checkpoint = partial(functions.post_batch_save_checkpoint, batch_num_for_saving=10000)
     trainer.add_to_hook_at_end("post_batch_hook", _save_checkpoint)
     # TODO:
     # 1. loader shuffle seed for deterministic load and save
     #    BUT if we resume and it should not shuffle from same seed
-    # 2. Save on steps instead of epochs (maybe)
     if args.testing:
         trainer.test_loops(200)
     else:
+        trainer.try_resume()
         trainer.train()
 
 

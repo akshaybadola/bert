@@ -52,6 +52,7 @@ class ConstantLR(LRScheduler):
     def get_lr(self):
         return self.base_lrs
 
+
 class CosineWarmUpScheduler(LRScheduler):
     """
     Applies a warm up period to the learning rate.
@@ -103,7 +104,8 @@ class LinearWarmUpScheduler(LRScheduler):
         if progress < self.warmup:
             return [base_lr * progress / self.warmup for base_lr in self.base_lrs]
         else:
-            return [base_lr * max(( progress - 1.0)/(self.warmup - 1.0), 0.) for base_lr in self.base_lrs]
+            return [base_lr * max(( progress - 1.0)/(self.warmup - 1.0), 0.)
+                    for base_lr in self.base_lrs]
 
 
 class PolyWarmUpScheduler(LRScheduler):
@@ -111,7 +113,8 @@ class PolyWarmUpScheduler(LRScheduler):
     Applies a warm up period to the learning rate.
     """
 
-    def __init__(self, optimizer, warmup, total_steps, degree=0.5, last_epoch=-1, base_lr=1., device='cpu'):
+    def __init__(self, optimizer, warmup, total_steps, degree=0.5, last_epoch=-1,
+                 base_lr=1., device='cpu'):
         self.warmup = torch.tensor(warmup, device=device)
         self.total_steps = torch.tensor(total_steps, device=device)
         self.degree = torch.tensor(degree, device=device)

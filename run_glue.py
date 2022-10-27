@@ -275,6 +275,14 @@ def main():
     )
     logger.info(f"Training/evaluation parameters {training_args}")
 
+    if custom_args.custom_model:
+        model_name = os.path.basename(custom_args.custom_config).split('.')[0]
+        training_args.output_dir = os.path.join("_".join([model_name, "glue"]), data_args.task_name)
+        if not os.path.exists(training_args.output_dir):
+            os.makedirs(training_args.output_dir)
+    else:
+        model_name = ""
+
     # Detecting last checkpoint.
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
@@ -419,16 +427,15 @@ def main():
         if training_args.do_train:
             state = torch.load(custom_args.custom_weights, map_location="cpu")
             model.load_state_dict(state["model_state_dict"], strict=False)
-            print(f"Loaded weights for {custom_args.custom_config.split('.')[0]} " +
+            print(f"Loaded weights for {model_name} " +
                   f"from {custom_args.custom_weights}")
         else:
-            weights_file = data_args.task_name + "_saves/pytorch_model.bin"
+            weights_file = os.path.join(model_name + "_glue", data_args.task_name, "pytorch_model.bin")
             state = torch.load(weights_file, map_location="cpu")
             model.load_state_dict(state)
-            print(f"Loaded weights for {custom_args.custom_config.split('.')[0]} " +
+            print(f"Loaded weights for {model_name} " +
                   f"from {weights_file}")
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased-whole")
-        print(model)
     else:
         model = AutoModelForSequenceClassification.from_pretrained(
             model_args.model_name_or_path,
@@ -439,7 +446,6 @@ def main():
             use_auth_token=True if model_args.use_auth_token else None,
             ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
         )
-
 
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:

@@ -7,5 +7,7 @@
     "learning_rate_phase1": 0.006,
     "learning_rate_phase2": 0.004,
     "masking": "static",
+    "device_batch_size_phase1":  512,
+    "max_seq_len_phase1": 128,
     "fp16": true
 }
