@@ -141,4 +141,3 @@ def test_data_whole_word(tokenizer):
     assert collated_whole['input_ids'].shape[1] <= 128
     lengths = np.array([x.shape[1] for x in collated_whole.values() if len(x.shape) == 2])
     assert np.all(lengths == lengths[0])
-    

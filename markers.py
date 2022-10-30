@@ -73,7 +73,7 @@ def save_sentence_embeddings(data_name, batch_size, gpu):
                          embeddings=embeddings)
         j += 1
         if not (j+1) % 10:
-            print(f"{(j+1)} done in {timer.time}")
+            print(f"{(j+1)} done out of {data_len//batch_size} in {timer.time}")
             timer.clear()
 
 

@@ -170,7 +170,8 @@ class ModelArguments:
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
     """
 
-    model_name_or_path: str = field(
+    model_name_or_path: Optional[str] = field(
+        default="",
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     config_name: Optional[str] = field(
@@ -293,7 +294,8 @@ def main():
 
     # Detecting last checkpoint.
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+    if os.path.isdir(training_args.output_dir) and\
+       training_args.do_train and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
             raise ValueError(
@@ -402,19 +404,15 @@ def main():
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     if custom_args.custom_model and custom_args.custom_config:
-        model_args.config_name = "bert-base-uncased"
+        if "convbert" in custom_args.custom_config:
+            model_args.config_name = "conv-bert-small"
+        if "bert" in custom_args.custom_config:
+            model_args.config_name = "bert-base-uncased"
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
         finetuning_task=data_args.task_name,
         cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
@@ -453,6 +451,13 @@ def main():
             revision=model_args.model_revision,
             use_auth_token=True if model_args.use_auth_token else None,
             ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_fast=model_args.use_fast_tokenizer,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
         )
 
     # Preprocessing the raw_datasets
@@ -800,7 +805,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_and_eval", action="store_true")
     parser.add_argument("--tasks", help="Comma separated names of tasks")
     args, others = parser.parse_known_args()
-    
+
     if not exactly_one(args.eval_only, args.train_and_eval, args.train_only):
         raise ValueError("Exactly one of train_only, eval_only or train_and_eval has to be given")
     sys.argv = sys.argv[:1]
@@ -825,7 +830,7 @@ if __name__ == "__main__":
             if args.model_name_or_path:
                 print("model_path will be overwritten for eval_only")
             setattr(training_args, "model_name_or_path", f"{task}_saves")
-        elif args.train_only or args.train_and_eval:
+        elif args.train_only or args.train_and_eval and "--custom_model" not in others:
             if args.model_name_or_path:
                 setattr(training_args, "model_name_or_path", args.model_name_or_path)
             else:

@@ -18,6 +18,7 @@ def parse_arguments():
     parser.add_argument("--optimizer", help="Which optimizer to use. [adam, lamb]")
 
     # Other parameters
+    parser.add_argument("--save_every", type=int)
     parser.add_argument("--mask_whole_words", action="store_true")
     parser.add_argument("--no_next_sentence_prediction", dest="next_sentence_prediction",
                         action="store_false")

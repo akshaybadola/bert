@@ -198,6 +198,37 @@ def dump_extra_opts(self, **kwargs):
                 json.dump(v, f)
 
 
+def set_seed(seed):
+    np.random.seed(seed)
+    # torch.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
+def get_dataloader(data_name, batch_size, num_datapoints, num_workers, shuffle, seq_align_len,
+                   max_seq_len, mask_whole_words, train_strategy, generator=None):
+    if data_name == "books-wiki":
+        shuffle = shuffle and not train_strategy == "steps"
+        loader = get_wiki_books_loader(batch_size, num_workers, 8, train_strategy,
+                                       num_datapoints, shuffle=shuffle, max_seq_len=max_seq_len,
+                                       min_seq_len=30, truncate_strategy="truncate_second",
+                                       mask_whole_words=mask_whole_words, generator=generator)
+        max_steps = math.ceil(num_datapoints / len(loader.dataset) * len(loader))
+    elif data_name == "owt":
+        if train_strategy == "epoch" and data_name == "owt":
+            raise ValueError("Epoch wise training not supported with OWT")
+        loader = get_owt_loader(num_datapoints, batch_size, num_workers, 8,
+                                max_seq_len=max_seq_len,
+                                min_seq_len=30, truncate_strategy="truncate_second",
+                                mask_whole_words=mask_whole_words, generator=generator)
+        max_steps = len(loader)
+    else:
+        raise ValueError(f"Unknown dataset {data_name}")
+    return loader, max_steps
+
+
 def main():
     args = Args.parse_arguments()
     if not args.resume_dir:
@@ -211,6 +242,7 @@ def main():
                 args.__dict__[k] = v
             elif k not in args.__dict__:
                 args.__dict__[k] = v
+    generator = set_seed(int(args.seed))
     sequence_output_is_dense = args.dense_sequence_output
     model, config = get_model_and_config(args.model_name, args.model_config_file)
     model.model_name = args.model_name
@@ -243,25 +275,28 @@ def main():
     if args.optimizer == "adam":
         args.gradient_accumulation_steps = 1
     if args.gradient_accumulation_steps > 1:
-        effective_batch_size = loader_batch_size * len(devices) * args.gradient_accumulation_steps
+        effective_batch_size = loader_batch_size * args.gradient_accumulation_steps
         print(f"loader_batch_size is {loader_batch_size}")
         print(f"Effective batch size for large batch training is {effective_batch_size}")
-    if args.dataset == "books-wiki":
-        loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
-                                       shuffle=not args.testing, max_seq_len=max_seq_len,
-                                       min_seq_len=30, truncate_strategy="truncate_second",
-                                       mask_whole_words=args.mask_whole_words)
-        max_steps = math.ceil(num_datapoints / len(loader.dataset) * len(loader))
-    elif args.dataset == "owt":
-        if args.train_strategy == "epoch" and args.dataset == "owt":
-            raise ValueError("Epoch wise training not supported with OWT")
-        loader = get_owt_loader(num_datapoints, loader_batch_size, args.num_workers, 8,
-                                max_seq_len=max_seq_len,
-                                min_seq_len=30, truncate_strategy="truncate_second",
-                                mask_whole_words=args.mask_whole_words)
-        max_steps = len(loader)
-    else:
-        raise ValueError(f"Unknown dataset {args.dataset}")
+    loader, max_steps = get_dataloader(args.dataset, loader_batch_size, num_datapoints,
+                                       args.num_workers, not args.testing, 8, max_seq_len,
+                                       args.mask_whole_words, args.train_strategy, generator)
+    # if args.dataset == "books-wiki":
+    #     loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
+    #                                    shuffle=not args.testing, max_seq_len=max_seq_len,
+    #                                    min_seq_len=30, truncate_strategy="truncate_second",
+    #                                    mask_whole_words=args.mask_whole_words)
+    #     max_steps = math.ceil(num_datapoints / len(loader.dataset) * len(loader))
+    # elif args.dataset == "owt":
+    #     if args.train_strategy == "epoch" and args.dataset == "owt":
+    #         raise ValueError("Epoch wise training not supported with OWT")
+    #     loader = get_owt_loader(num_datapoints, loader_batch_size, args.num_workers, 8,
+    #                             max_seq_len=max_seq_len,
+    #                             min_seq_len=30, truncate_strategy="truncate_second",
+    #                             mask_whole_words=args.mask_whole_words)
+    #     max_steps = len(loader)
+    # else:
+    #     raise ValueError(f"Unknown dataset {args.dataset}")
     optimizer, lr_scheduler, grad_scaler = get_optimizer(args.optimizer,
                                                          model, devices, warmup_proportion,
                                                          max_steps, learning_rate,
@@ -317,7 +352,8 @@ def main():
     trainer.add_to_hook_at_end("post_batch_hook", partial(functions.update_metrics, quiet=True))
     if args.dataset == "books-wiki":
         trainer.add_to_hook_at_end("post_epoch_hook", lambda self: loader.dataset.reset())
-    _save_checkpoint = partial(functions.post_batch_save_checkpoint, batch_num_for_saving=10000)
+    _save_checkpoint = partial(functions.post_batch_save_checkpoint,
+                               batch_num_for_saving=args.save_every)
     trainer.add_to_hook_at_end("post_batch_hook", _save_checkpoint)
     trainer.add_to_hook_at_end("pre_training_hook", dump_extra_opts)
     # TODO:

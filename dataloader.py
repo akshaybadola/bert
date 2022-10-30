@@ -558,9 +558,11 @@ def mlm_collator(batch, seq_align_len, tokenizer, pad_full=0, mask_whole_words=F
     return output
 
 
-def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
+def get_wiki_books_loader(batch_size, num_workers, seq_align_len, train_strategy,
+                          num_train_examples=None, shuffle=True,
                           max_seq_len=None, min_seq_len=None,
-                          truncate_strategy=None, mask_whole_words=True):
+                          truncate_strategy=None, mask_whole_words=True,
+                          generator=None):
     if max_seq_len is None:
         raise ValueError("max_seq_len cannot be None")
     if mask_whole_words:
@@ -572,16 +574,27 @@ def get_wiki_books_loader(batch_size, num_workers, seq_align_len, shuffle=True,
                                 shuffle=shuffle, max_seq_len=max_seq_len,
                                 min_seq_len=min_seq_len, truncate_strategy=truncate_strategy,
                                 whole_word_mask=mask_whole_words)
-    loader = torch.utils.data.DataLoader(data, shuffle=False,
-                                         num_workers=num_workers, drop_last=False,
-                                         pin_memory=True, batch_size=batch_size,
-                                         collate_fn=collate_fn)
+    if train_strategy == "epoch":
+        loader = torch.utils.data.DataLoader(data, shuffle=False,
+                                             num_workers=num_workers, drop_last=False,
+                                             pin_memory=True, batch_size=batch_size,
+                                             collate_fn=collate_fn)
+    else:
+        if not num_train_examples:
+            raise ValueError("Bad num_train_examples {num_train_examples} for train_strategy steps")
+        sampler = torch.utils.data.RandomSampler(data, replacement=True,
+                                                 num_samples=num_train_examples,
+                                                 generator=generator)
+        loader = torch.utils.data.DataLoader(data, sampler=sampler,
+                                             num_workers=num_workers, drop_last=False,
+                                             pin_memory=True, batch_size=batch_size,
+                                             collate_fn=collate_fn)
     return loader
 
 
 def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
                    max_seq_len=None, min_seq_len=None, truncate_strategy=None,
-                   filter_length=0, mask_whole_words=True):
+                   filter_length=0, mask_whole_words=True, generator=None):
     if max_seq_len is None:
         raise ValueError("max_seq_len cannot be None")
     mask_whole_words = True
@@ -598,7 +611,8 @@ def get_owt_loader(num_train_examples, batch_size, num_workers, seq_align_len,
                           truncate_strategy=truncate_strategy,
                           selection=selection)
     sampler = torch.utils.data.RandomSampler(data, replacement=True,
-                                             num_samples=num_train_examples)
+                                             num_samples=num_train_examples,
+                                             generator=generator)
     loader = torch.utils.data.DataLoader(data, sampler=sampler,
                                          num_workers=num_workers, drop_last=False,
                                          pin_memory=True, batch_size=batch_size,
