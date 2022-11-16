@@ -18,12 +18,15 @@ def parse_arguments():
     parser.add_argument("--optimizer", help="Which optimizer to use. [adam, lamb]")
 
     # Other parameters
+    parser.add_argument("--dummy_scheduler", action="store_true")
+    parser.add_argument("--hf_model", action="store_true")
+    parser.add_argument("--lr_scheduler")
     parser.add_argument("--save_every", type=int)
     parser.add_argument("--mask_whole_words", action="store_true")
     parser.add_argument("--no_next_sentence_prediction", dest="next_sentence_prediction",
                         action="store_false")
     parser.add_argument("--device_batch_size_phase1", type=int)
-    parser.add_argument("--train_strategy", default="epoch", help="One of [epochs, steps]")
+    parser.add_argument("--train_strategy", default="epochs", help="One of [epochs, steps]")
     parser.add_argument("--use_prefetch", action="store_true")
     parser.add_argument("--max_predictions_per_seq",
                         default=80,

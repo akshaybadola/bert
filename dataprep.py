@@ -1,8 +1,15 @@
 from functools import partial
+import os
+import glob
 
+import numpy as np
 from transformers import BertTokenizer, BertModel, AutoTokenizer
 from datasets import load_dataset, concatenate_datasets, load_from_disk
 from transformers import BertTokenizerFast
+
+from common_pyutil.functional import takewhile, flatten
+
+rng = np.random
 
 
 def load_data() -> None:
@@ -149,3 +156,32 @@ def process_owt(num_proc=8):
     owt = load_dataset("openwebtext")
     processed_data = preprocess_data_text(owt['train'], tokenizer, num_proc, 5)
     save_data(processed_data, path="./owt-filtered-with-tokens")
+
+
+
+# def nv_prep_create_instances(all_documents, document_index,
+#                              max_seq_length, short_seq_prob,
+#                              masked_lm_prob, max_predictions_per_seq,
+#                              vocab_words):
+#     document = all_documents[document_index]
+
+#     # Account for [CLS], [SEP], [SEP]
+#     max_num_tokens = max_seq_length - 3
+#     target_seq_length = max_num_tokens
+#     if np.random.random() < short_seq_prob:
+#         target_seq_length = np.random.randint(2, max_num_tokens)
+#     instances = []
+#     current_chunk = []
+#     current_length = 0
+#     i = 0
+#     doc_len = len(document)
+#     while i < doc_len:
+#         segment = document[i]
+#         current_chunk.append(segment)
+#         current_length += len(segment)
+#         if i == doc_len - 1 or current_length >= target_seq_length:
+#             if current_chunk:
+#                 process_current_chunk(current_chunk)
+#             current_chunk = []
+#             current_length = 0
+#         i += 1

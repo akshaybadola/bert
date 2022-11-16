@@ -26,33 +26,48 @@ def dict_to(tensors, device):
     return {k: v.to(device) for k, v in tensors.items()}
 
 
-custom_model = True
+class DummyLRScheduler:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def load_state_dict(self, *args, **kwargs):
+        pass
+
+    def state_dict(self):
+        return {}
+
+    def step(self):
+        pass
 
 
 class BertUpdateFunction(SimpleUpdateFunction):
-    def __init__(self, grad_scaler, lr_scheduler, grad_accumulation_steps):
+    def __init__(self, grad_scaler, lr_scheduler, grad_accumulation_steps, custom_model):
         self._train = True
         self._grad_scaler = grad_scaler
         self._lr_scheduler = lr_scheduler
         self._grad_accumulation_steps = grad_accumulation_steps
         self._returns = ["loss", "scaled_loss", "total"]
+        self._custom_model = custom_model
+        self._batch_num_init_flag = True
 
     # Leaky Abstraction alert!
     # We need to know whether batch_num starts from 0 or 1, LOL
     # Have worked around it though
     def is_gradient_accumulation_step(self, batch_num):
-        if batch_num == 0:
-            self._batch_starts_from_zero = True
-        else:
-            self._batch_starts_from_zero = False
-        if self._batch_starts_from_zero:
+        if self._batch_num_init_flag:
+            if batch_num == 0 or not (batch_num % self._grad_accumulation_steps):
+                self._grad_step_divides_batch_num = True
+            else:
+                self._grad_step_divides_batch_num = False
+            self._batch_num_init_flag = False
+        if self._grad_step_divides_batch_num:
             batch_num = batch_num + 1
         return not (batch_num % self._grad_accumulation_steps)
 
     def __call__(self, batch, criterion, model, optimizer, **kwargs):
         batch = {k: model.to_(v) for k, v in batch.items()}
         with torch.cuda.amp.autocast(enabled=True):
-            if custom_model:
+            if self._custom_model:
                 prediction_scores, seq_relationship_score = model(input_ids=batch['input_ids'],
                                                                   token_type_ids=batch['token_type_ids'],
                                                                   attention_mask=batch['attention_mask'],
@@ -115,7 +130,8 @@ class BertPretrainingCriterion(torch.nn.Module):
             return masked_lm_loss
 
 
-def get_model_and_config(model_name, config_file, sequence_output_is_dense=True):
+def get_model_and_config(model_name, config_file, custom_model):
+    sequence_output_is_dense = custom_model
     if custom_model:
         config = modeling.BertConfig.from_json_file(config_file)
     else:
@@ -132,7 +148,7 @@ def get_model_and_config(model_name, config_file, sequence_output_is_dense=True)
 
 
 def get_optimizer(optimizer_name, model, devices, warmup_proportion,
-                  max_steps, learning_rate, init_loss_scale):
+                  max_steps, learning_rate, init_loss_scale, dummy):
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'gamma', 'beta', 'LayerNorm']
 
@@ -144,17 +160,23 @@ def get_optimizer(optimizer_name, model, devices, warmup_proportion,
         device = torch.device(devices[0])
         optimizer = FusedLAMBAMP(optimizer_grouped_parameters,
                                  lr=learning_rate, device=device)
-        lr_scheduler = PolyWarmUpScheduler(optimizer,
-                                           warmup=warmup_proportion,
-                                           total_steps=max_steps,
-                                           base_lr=learning_rate,
-                                           device=device)
+        if dummy:
+            lr_scheduler = DummyLRScheduler()
+        else:
+            lr_scheduler = PolyWarmUpScheduler(optimizer,
+                                               warmup=warmup_proportion,
+                                               total_steps=max_steps,
+                                               base_lr=learning_rate,
+                                               device=device)
     elif optimizer_name == "adam":
         optimizer = torch.optim.Adam(optimizer_grouped_parameters,
                                      lr=learning_rate)
-        lr_scheduler = LinearWarmUpScheduler(optimizer,
-                                             warmup=warmup_proportion,
-                                             total_steps=max_steps)
+        if dummy:
+            lr_scheduler = DummyLRScheduler()
+        else:
+            lr_scheduler = LinearWarmUpScheduler(optimizer,
+                                                 warmup=warmup_proportion,
+                                                 total_steps=max_steps)
     else:
         raise ValueError(f"Unknown optmizer {optimizer_name}")
     grad_scaler = torch.cuda.amp.GradScaler(init_scale=init_loss_scale, enabled=True)
@@ -242,9 +264,20 @@ def main():
                 args.__dict__[k] = v
             elif k not in args.__dict__:
                 args.__dict__[k] = v
+    if args.devices == "-1":
+        devices = ["cpu"]
+    else:
+        devices = [*map(int, args.devices.split(","))]
+    torch.cuda.set_device(devices[0])
     generator = set_seed(int(args.seed))
-    sequence_output_is_dense = args.dense_sequence_output
-    model, config = get_model_and_config(args.model_name, args.model_config_file)
+    custom_model = not args.hf_model
+    if custom_model:
+        print("Using custom models")
+    else:
+        print("Using HF models")
+    model, config = get_model_and_config(args.model_name,
+                                         args.model_config_file,
+                                         custom_model)
     model.model_name = args.model_name
 
     # NOTE: For DataParallel, for DDP a different approach will have to be used
@@ -262,10 +295,6 @@ def main():
         warmup_proportion = args.warmup_steps_phase1 / args.train_steps_phase1
         learning_rate = args.learning_rate_phase1
         phase2 = False
-    if args.devices == "-1":
-        devices = ["cpu"]
-    else:
-        devices = [*map(int, args.devices.split(","))]
     model = model.cuda(devices[0])
     loader_batch_size = device_batch_size * len(devices)
     # NOTE: Effective train_batch_size is:
@@ -281,26 +310,11 @@ def main():
     loader, max_steps = get_dataloader(args.dataset, loader_batch_size, num_datapoints,
                                        args.num_workers, not args.testing, 8, max_seq_len,
                                        args.mask_whole_words, args.train_strategy, generator)
-    # if args.dataset == "books-wiki":
-    #     loader = get_wiki_books_loader(loader_batch_size, args.num_workers, 8,
-    #                                    shuffle=not args.testing, max_seq_len=max_seq_len,
-    #                                    min_seq_len=30, truncate_strategy="truncate_second",
-    #                                    mask_whole_words=args.mask_whole_words)
-    #     max_steps = math.ceil(num_datapoints / len(loader.dataset) * len(loader))
-    # elif args.dataset == "owt":
-    #     if args.train_strategy == "epoch" and args.dataset == "owt":
-    #         raise ValueError("Epoch wise training not supported with OWT")
-    #     loader = get_owt_loader(num_datapoints, loader_batch_size, args.num_workers, 8,
-    #                             max_seq_len=max_seq_len,
-    #                             min_seq_len=30, truncate_strategy="truncate_second",
-    #                             mask_whole_words=args.mask_whole_words)
-    #     max_steps = len(loader)
-    # else:
-    #     raise ValueError(f"Unknown dataset {args.dataset}")
     optimizer, lr_scheduler, grad_scaler = get_optimizer(args.optimizer,
                                                          model, devices, warmup_proportion,
                                                          max_steps, learning_rate,
-                                                         args.init_loss_scale)
+                                                         args.init_loss_scale,
+                                                         dummy=args.dummy_scheduler)
     if args.optimizer == "lamb":
         optimizer.setup_fp32_params()
     elif args.optimizer == "adam":
@@ -309,7 +323,7 @@ def main():
     else:
         raise ValueError(f"Unknown optmizer {args.optimizer}")
 
-    if args.train_strategy == "epoch":
+    if args.train_strategy == "epochs":
         num_epochs = math.ceil(max_steps / len(loader))
     elif args.train_strategy == "steps":
         num_epochs = 1
@@ -318,15 +332,18 @@ def main():
                                          nsp=args.next_sentence_prediction)
 
     update_function = BertUpdateFunction(grad_scaler, lr_scheduler,
-                                         args.gradient_accumulation_steps)
+                                         args.gradient_accumulation_steps,
+                                         custom_model)
     torch.backends.cudnn.benchmark = True
     torch.autograd.set_detect_anomaly(True)
     trainer_params = {"gpus": devices, "cuda": True,
                       "seed": args.seed, "resume": True,
                       "use_prefetch": args.use_prefetch,
+                      "train_strategy": args.train_strategy,
                       "metrics": ["loss", "scaled_loss", "total"], "val_frequency": 1,
                       "test_frequency": 5,
                       "log_frequency": 1 if args.testing else 5,
+                      "max_steps": num_datapoints,
                       "max_epochs": num_epochs}
     trainer_name = "bert_trainer_" + ("phase2" if phase2 else "phase1")
     data = {"name": args.dataset, "train": loader.dataset}
@@ -368,6 +385,9 @@ def main():
             if files:
                 trainer._resume_path = Path(f"{savedir}/{files[-1]}")
         trainer.try_resume()
+        if trainer.trainer_params.train_strategy == "steps":
+            max_steps = (args.train_steps_phase1 * 256) // args.device_batch_size_phase1
+            trainer.trainer_params.max_steps = max_steps
         trainer.train()
 
 

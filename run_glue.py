@@ -217,6 +217,10 @@ class CustomArgs:
         default=False,
         metadata={"help": "Use custom model rather than HF"}
     )
+    custom_hf: bool = field(
+        default=False,
+        metadata={"help": "Use HF model with rest of custom args"}
+    )
     custom_weights: Optional[str] = field(
         default=None,
         metadata={"help": "Custom model weights file"}
@@ -286,7 +290,11 @@ def main():
             suffix = f"glue_{custom_args.custom_suffix}"
         else:
             suffix = "glue"
-        training_args.output_dir = os.path.join("_".join([model_name, suffix]), data_args.task_name)
+        if custom_args.custom_hf:
+            suffix += "_hf"
+        training_args.output_dir = os.path.join("glue_results",
+                                                "_".join([model_name, suffix]),
+                                                data_args.task_name)
         if not os.path.exists(training_args.output_dir):
             os.makedirs(training_args.output_dir)
     else:
@@ -428,7 +436,10 @@ def main():
         if config_alt.vocab_size % 8 != 0:
             config_alt.vocab_size += 8 - (config_alt.vocab_size % 8)
         config.__dict__.update(config_alt.to_dict())
-        model = modeling.BertForSequenceClassification(config)
+        if custom_args.custom_hf:
+            model = transformers.BertForSequenceClassification(config)
+        else:
+            model = modeling.BertForSequenceClassification(config)
         import torch
         if training_args.do_train:
             state = torch.load(custom_args.custom_weights, map_location="cpu")
@@ -436,7 +447,8 @@ def main():
             print(f"Loaded weights for {model_name} " +
                   f"from {custom_args.custom_weights}")
         else:
-            weights_file = os.path.join(model_name + "_glue", data_args.task_name, "pytorch_model.bin")
+            weights_file = os.path.join(model_name + "_glue",
+                                        data_args.task_name, "pytorch_model.bin")
             state = torch.load(weights_file, map_location="cpu")
             model.load_state_dict(state)
             print(f"Loaded weights for {model_name} " +
@@ -820,7 +832,7 @@ if __name__ == "__main__":
         raise ValueError("gpus is required. Do not pass in environment variable as that's redundant")
     for task in tasks:
         training_args = default_training_args()
-        setattr(training_args, "output_dir", f"{task}_saves")
+        setattr(training_args, "output_dir", f"glue_results/{task}_saves")
         if args.train_batch_size:
             setattr(training_args, "per_device_train_batch_size", args.train_batch_size)
         if args.eval_batch_size:
