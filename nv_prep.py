@@ -45,7 +45,6 @@ def nv_prep_format_book_corpus(booksdir, outfile):
             if not (i+1) % 100:
                 print(f"{i+1} out of {len_books} done")
 
-from tqdm import tqdm
 
 def nv_prep_create_documents(input_file, outfile, tokenizer):
     all_documents = [[]]
@@ -68,13 +67,6 @@ def nv_prep_create_documents(input_file, outfile, tokenizer):
                 print(f"{j+1} done")
     with open(outfile, "wb") as f:
         pickle.dump(all_documents, f)
-
-
-def get_random_indx_except(max_num, ex):
-    p = np.ones((max_num,))
-    p[ex] = 0
-    p = p / p.sum()
-    return np.random.choice(np.arange(max_num), p=p)
 
 
 MaskedLmInstance = collections.namedtuple("MaskedLmInstance",
@@ -133,6 +125,9 @@ def create_masked_lm_predictions(tokens, masked_lm_prob,
 class TrainingInstance(object):
     """A single training instance (sentence pair)."""
 
+    _keys = ["tokens", "segment_ids", "is_random_next",
+             "masked_lm_positions", "masked_lm_labels"] 
+
     def __init__(self, tokens, segment_ids, masked_lm_positions, masked_lm_labels,
                  is_random_next):
         self.tokens = tokens
@@ -151,6 +146,10 @@ class TrainingInstance(object):
         s += "\n"
         return s
     
+    @classmethod
+    def keys(cls):
+        return cls._keys
+
     def to_dict(self):
         s = {}
         s["tokens"] = self.tokens
@@ -194,10 +193,10 @@ class NVPrep:
             else:
                 trunc_tokens.pop()
 
-    def process_current_chunk(self, document, document_index, current_chunk, i):
-        doc_len = len(document)
+    def process_current_chunk(self, document, document_index, current_chunk, tokens_chunk,
+                              target_seq_length, i):
         a_end_indx = 1
-        if len(current_chunk) >= 2:
+        if len(current_chunk) > 2:
             a_end_indx = rng.randint(1, len(current_chunk) - 1)
         tokens_a = []
         for j in range(a_end_indx):
@@ -207,12 +206,18 @@ class NVPrep:
         is_random_next = False
         if len(current_chunk) == 1 or rng.random() < 0.5:
             is_random_next = True
-            target_b_length = self.target_seq_length - len(tokens_a)
-            random_document_index = get_random_indx_except(doc_len, document_index)
+            target_b_length = target_seq_length - len(tokens_a)
+            _j = 0
+            random_document_index = np.random.randint(len(self.all_documents))
+            while (random_document_index == document_index) and _j < 10:
+                random_document_index = np.random.randint(len(self.all_documents))
             if random_document_index == document_index:
                 is_random_next = False
-            random_document = self.all_documents[random_document_index]
-            random_start = rng.randint(0, len(random_document) - 1)
+            random_document = self.all_documents[random_document_index]["tokens"]
+            if len(random_document) == 1:
+                random_start = 0
+            else:
+                random_start = rng.randint(0, len(random_document) - 1)
             for j in range(random_start, len(random_document)):
                 tokens_b.extend(random_document[j])
                 if len(tokens_b) >= target_b_length:
@@ -259,27 +264,54 @@ class NVPrep:
                                     masked_lm_labels=masked_lm_labels)
         return instance
 
-    def create_instances_from_document(self, document_index):
-        document = self.all_documents[document_index]
+
+    def process_document_subr(self, document, document_index):
         instances = []
         current_chunk = []
         current_length = 0
         i = 0
         doc_len = len(document)
+        if rng.random() < self.short_seq_prob:
+            target_seq_length = rng.randint(2, self.target_seq_length)
+        else:
+            target_seq_length = self.target_seq_length
         while i < doc_len:
             segment = document[i]
             current_chunk.append(segment)
             current_length += len(segment)
-            if i == doc_len - 1 or current_length >= self.target_seq_length:
+            # tokens_length += len(toks)
+            if i == doc_len - 1 or current_length >= target_seq_length:
                 if current_chunk:
                     tokens_a, tokens_b, is_random_next, i =\
-                        self.process_current_chunk(document, document_index, current_chunk, i)
+                        self.process_current_chunk(document, document_index, current_chunk, None,
+                                                   target_seq_length, i)
+                    # self.process_current_chunk(document, document_index,
+                    # current_chunk, tokens_chunk, i)
                     instance = self.concat_tokens(tokens_a, tokens_b, is_random_next)
                     instances.append(instance)
                 current_chunk = []
                 current_length = 0
             i += 1
         return instances
+
+    def create_instances_from_document(self, document_index):
+        # document = self.all_documents[document_index]["text"]
+        document = self.all_documents[document_index]["tokens"]
+        instances = self.process_document_subr(document, document_index)
+        return instances
+    
+    def create_instances_from_document_books(self,example, document_index):
+        document = self.all_documents[document_index]["text"]
+        instances = self.process_document_subr(document, document_index)
+        return {"instances": instances}
+
+    def process_dataset_row(self, example, idx):
+        document = example["tokens"]
+        try:
+            instances = self.process_document_subr(document, idx)
+        except Exception as e:
+            instances = []
+        return {"instances": instances}
 
     def process_all_documents(self, dupe_factor):
         self.instances = []
