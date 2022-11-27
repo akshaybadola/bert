@@ -112,6 +112,19 @@ def write_metadata(data_dir):
 
 
 def dump_to_pq(data, out_dir, prec):
+    """Dump Huggingface :code:`datasets` data to parquet files
+
+    The datasets is generated according to Nvidia implementation which makes one data instance
+    per document. That is used to generate masks while taking care that next sentence task
+    doesn't use another document's sentence for that.
+
+    Args:
+        data: :code:`datasets` dataset
+        out_dir: output director to place the files
+        prec: number of zeros to for formatting filenames
+
+
+    """
     for i in range(len(data)):
         out_file = f"{out_dir}/data-{i:0{prec}}.pq"
         if os.path.exists(out_file):
@@ -122,6 +135,15 @@ def dump_to_pq(data, out_dir, prec):
 
 
 def load_from_pq(data_dir):
+    """Load parquet files into memory
+
+    Although it takes a bit of time and memory consumption is very high, the
+    speedup for preprocessing is worth it.
+
+    Args:
+        data_dir: Directory where the parquet files are stored
+
+    """
     timer = Timer(True)
     files = [os.path.join(data_dir, f) for f in os.listdir(data_dir)]
     files.sort()
@@ -136,6 +158,22 @@ def load_from_pq(data_dir):
 
 
 class ParquetData(torch.utils.data.Dataset):
+    """A simple parquet files Dataset
+
+    From each document per data instance, we extract lines and generate
+    instances for MLM task. This is optimized for loading with :mod:`torch`.
+
+    The data instances are written as batches of certain :code:`split_size`.
+    See :class:`nv_prep.TrainingInstance` for how it's formatted.
+
+    For any example we find the file index and then example index by simple
+    division
+
+    Args:
+        data_dir: The dataset containing parquet files
+
+    """
+
     def __init__(self, data_dir):
         self.files = glob.glob(f"{data_dir}/*")
         self.files.sort()

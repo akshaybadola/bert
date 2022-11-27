@@ -133,10 +133,10 @@ def create_masked_lm_predictions(tokens, masked_lm_prob,
 
 
 class TrainingInstance(object):
-    """A single training instance (sentence pair)."""
+    """A single training instance (sentence pair) for MLM task"""
 
     _keys = ["tokens", "segment_ids", "is_random_next",
-             "masked_lm_positions", "masked_lm_labels"] 
+             "masked_lm_positions", "masked_lm_labels"]
 
     def __init__(self, tokens, segment_ids, masked_lm_positions, masked_lm_labels,
                  is_random_next):
