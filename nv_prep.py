@@ -155,19 +155,13 @@ class TrainingInstance(object):
         s += "masked_lm_labels: %s\n" % (" ".join(self.masked_lm_labels))
         s += "\n"
         return s
-    
+
     @classmethod
     def keys(cls):
-        return cls._keys
+        return cls._keys.copy()
 
     def to_dict(self):
-        s = {}
-        s["tokens"] = self.tokens
-        s["segment_ids"] = self.segment_ids
-        s["is_random_next"] = self.is_random_next
-        s["masked_lm_positions"] = self.masked_lm_positions
-        s["masked_lm_labels"] = self.masked_lm_labels
-        return s
+        return {k: self.__dict__[k] for k in self._keys}
 
     def __repr__(self):
         return self.__str__()
@@ -185,6 +179,16 @@ class NVPrep:
         self.max_predictions_per_seq = max_predictions_per_seq
         self.tokenizer = tokenizer
         self.vocab_words = list(tokenizer.vocab.keys())
+        self.timer = Timer()
+        self.acc_timer_1 = Timer(True)
+        self.acc_timer_2 = Timer(True)
+        self.acc_timer_3 = Timer(True)
+
+    def get_document_item(self, document, i):
+        doc = document[i]
+        if not isinstance(doc, list):
+            doc = doc.as_py()
+        return doc
 
     def truncate_seq_pair(self, tokens_a, tokens_b):
         """Truncates a pair of sequences to a maximum sequence length."""
@@ -205,13 +209,13 @@ class NVPrep:
 
     def process_current_chunk(self, document, document_index, current_chunk, tokens_chunk,
                               target_seq_length, i):
+        timer = self.timer
         a_end_indx = 1
         if len(current_chunk) > 2:
             a_end_indx = rng.randint(1, len(current_chunk) - 1)
         tokens_a = []
         for j in range(a_end_indx):
             tokens_a.extend(current_chunk[j])
-
         tokens_b = []
         is_random_next = False
         if len(current_chunk) == 1 or rng.random() < 0.5:
@@ -223,13 +227,15 @@ class NVPrep:
                 random_document_index = np.random.randint(len(self.documents))
             if random_document_index == document_index:
                 is_random_next = False
-            random_document = self.documents[random_document_index]["tokens"]
+            with self.acc_timer_2:
+                random_document = self.documents[random_document_index]["tokens"]
+                # random_document = self.documents.data["tokens"][random_document_index].as_py()
             if len(random_document) == 1:
                 random_start = 0
             else:
                 random_start = rng.randint(0, len(random_document) - 1)
             for j in range(random_start, len(random_document)):
-                tokens_b.extend(random_document[j])
+                tokens_b.extend(self.get_document_item(random_document, j))
                 if len(tokens_b) >= target_b_length:
                     break
             num_unused_segments = len(current_chunk) - a_end_indx
@@ -285,19 +291,23 @@ class NVPrep:
         else:
             target_seq_length = self.target_seq_length
         while i < doc_len:
-            segment = document[i]
+            segment = self.get_document_item(document, i)
             current_chunk.append(segment)
             current_length += len(segment)
-            # tokens_length += len(toks)
             if i == doc_len - 1 or current_length >= target_seq_length:
                 if current_chunk:
-                    tokens_a, tokens_b, is_random_next, i =\
-                        self.process_current_chunk(document, document_index, current_chunk, None,
-                                                   target_seq_length, i)
+                    with self.acc_timer_3:
+                        tokens_a, tokens_b, is_random_next, i =\
+                            self.process_current_chunk(document, document_index, current_chunk, None,
+                                                       target_seq_length, i)
                     # self.process_current_chunk(document, document_index,
                     # current_chunk, tokens_chunk, i)
-                    instance = self.concat_tokens(tokens_a, tokens_b, is_random_next)
-                    instances.append(instance)
+                    with self.acc_timer_1:
+                        instance = self.concat_tokens(tokens_a, tokens_b, is_random_next)
+                        instances.append(instance)
+                    # if not (i+1) % 10:
+                    #     print(f"Concat tokens time {self.acc_timer_1.time}")
+                    #     print(f"process_current_chunk time: {self.acc_timer_3.time}")
                 current_chunk = []
                 current_length = 0
             i += 1
@@ -306,20 +316,22 @@ class NVPrep:
     def create_instances_from_document(self, document_index):
         # document = self.documents[document_index]["text"]
         document = self.documents[document_index]["tokens"]
+        # document = self.documents.data["tokens"][document_index]
         instances = self.process_document_subr(document, document_index)
         return instances
     
-    def create_instances_from_document_books(self,example, document_index):
+    def create_instances_from_document_books(self, example, document_index):
         document = self.documents[document_index]["text"]
+        # document = self.documents.data["tokens"][document_index]
         instances = self.process_document_subr(document, document_index)
         return {"instances": instances}
 
     def process_dataset_row(self, example, idx):
         document = example["tokens"]
-        #try:
-        #    instances = self.process_document_subr(document, idx)
-        #except Exception as e:
-        #    instances = []
+        # try:
+        #     instances = self.process_document_subr(document, idx)
+        # except Exception as e:
+        #     instances = []
         instances = self.process_document_subr(document, idx)
         return {"instances": instances}
 
@@ -335,7 +347,7 @@ class Data(torch.utils.data.Dataset):
     def __init__(self, data, max_seq_length, short_seq_prob, masked_lm_prob,
                  max_predictions_per_seq, tokenizer):
         self.data = data
-        self.keys = TrainingInstance.keys().copy()
+        self.keys = TrainingInstance.keys()
         self.prep = NVPrep(documents=data, max_seq_length=max_seq_length,
                            short_seq_prob=short_seq_prob,
                            masked_lm_prob=masked_lm_prob,
@@ -346,9 +358,7 @@ class Data(torch.utils.data.Dataset):
         return len(self.data)
 
     def __getitem__(self, i):
-        instances = self.prep.process_dataset_row(self.data[i], i)
-        if instances:
-            instances = instances["instances"]
+        instances = self.prep.process_document_subr(self.data[i]["tokens"], i)
         result = {k: [] for k in self.keys}
         for x in instances:
             for k in self.keys:
@@ -366,20 +376,27 @@ def collate(batch):
     return instances
 
 
-def prep_books(index, max_seq_length, short_seq_prob=0.1, masked_lm_prob=0.15,
+def prep_books(index, data, max_seq_length, short_seq_prob=0.1, masked_lm_prob=0.15,
                max_predictions_per_seq=20, loader_batch_size=16, split_size=32000,
                num_workers=16):
     timer = Timer()
     tokenizer = BertTokenizerFast.from_pretrained("./bert-base-uncased-whole")
-    data = datasets.load_from_disk("bookcorpus-split-filtered")
+    if data is None:
+        data = datasets.load_from_disk("bookcorpus-split-filtered")
     dset = Data(data, max_seq_length, short_seq_prob,
                 masked_lm_prob, max_predictions_per_seq, tokenizer)
-    loader = torch.utils.data.DataLoader(dset, batch_size=loader_batch_size,
-                                         num_workers=num_workers,
-                                         drop_last=False, shuffle=False,
-                                         collate_fn=parquet.collate)
-    keys = TrainingInstance.keys().copy()
-    it = iter(loader)
+    loader_kwargs = {"batch_size": loader_batch_size,
+                     "num_workers": num_workers,
+                     "drop_last": False,
+                     "shuffle": False,
+                     "collate_fn": parquet.collate}
+    # if num_workers:
+    #     loader_kwargs["prefetch_factor"] = 4
+    loader = torch.utils.data.DataLoader(dset, **loader_kwargs)
+    keys = TrainingInstance.keys()
+    with timer:
+        it = iter(loader)
+    print(f"Time for getting loader iterator {timer.time}")
     out_dir = f"bookcorpus-parquet-dupe-{max_seq_length}-{index:02}"
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
@@ -389,33 +406,32 @@ def prep_books(index, max_seq_length, short_seq_prob=0.1, masked_lm_prob=0.15,
     while len_data := len_data // 10:
         prec += 1
     i = 0
+    j = 0
     temp = {k: [] for k in keys}
-    while True:
-        with timer:
-            batch = it.__next__()
-        print(f"Time for getting batch {timer.time}")
-        with timer:
+    with timer:
+        while True:
+            try:
+                batch = it.__next__()
+                j += 1
+            except StopIteration:
+                break
             for key in keys:
-                # for item in batch[key]:
-                #     temp[key].append(item)
                 temp[key].extend(batch[key])
-        print(f"Time for extending temp {timer.time}")
-            # NOTE: This assumed batch is a list of dicts
-            #       however it's only a dict because of collate function
-            # for b in batch:
-            #     for k in keys:
-            #         temp[k].extend(b[k])
-            # if len(temp[keys[0]] >= split_size):
-        if len(temp[keys[0]]) >= split_size:
-            pq.write_table(pa.table({k: temp[k][:split_size] for k in keys}),
-                           os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
-                           compression="NONE")
-            for k in temp:
-                temp[k] = temp[k][split_size:]
-            with open(os.path.join(out_dir, f"data-{i:0{prec}}.meta"), "w") as fp:
-                json.dump({"len": len(data)}, fp)
-            print(f"{i+1} out of {len_loader} done")
-            i += 1
+            if len(temp[keys[0]]) >= split_size:
+                pq.write_table(pa.table({k: temp[k][:split_size] for k in keys}),
+                               os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
+                               compression="NONE")
+                for k in temp:
+                    temp[k] = temp[k][split_size:]
+                print(f"File number {i+1} written")
+                i += 1
+            if not j % 100:
+                print(f"{j} out of {len_loader} batches fetched")
+        pq.write_table(pa.table({k: temp[k] for k in keys}),
+                       os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
+                       compression="NONE")
+        print(f"File number {i+1} written")
+    print(f"Total time taken for prep: {timer.time}")
 
 
 if __name__ == "__main__":
@@ -425,7 +441,9 @@ if __name__ == "__main__":
     parser.add_argument("--max-predictions-per-seq", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--split-size", type=int, default=32000)
+    parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--dupes", type=int, default=5)
+    parser.add_argument("--parquet", action="store_true")
     parser.add_argument("--num-workers", type=int, default=16)
     args = parser.parse_args()
     if args.data == "wiki":
@@ -433,8 +451,13 @@ if __name__ == "__main__":
         # for i in range(args.dupes):
         #     prep_wiki(index=i, max_seq_length=args.max_seq_length)
     elif args.data == "books":
-        for i in range(args.dupes):
-            prep_books(index=i, max_seq_length=args.max_seq_length,
+        if args.parquet:
+            print("Reading from parquet files")
+            data = parquet.load_from_pq("./bookcorpus-split-filtered-tokens-parquet")
+        else:
+            data = None
+        for i in range(args.start, args.dupes):
+            prep_books(index=i, data=data, max_seq_length=args.max_seq_length,
                        max_predictions_per_seq=args.max_predictions_per_seq,
                        loader_batch_size=args.batch_size,
                        split_size=args.split_size,
