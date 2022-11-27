@@ -11,11 +11,14 @@ import pyarrow.parquet as pq
 from common_pyutil.monitor import Timer
 
 
+data_keys = ['tokens', 'segment_ids', 'is_random_next', 'masked_lm_positions',
+             'masked_lm_labels']
+
+
 class HFData(torch.utils.data.Dataset):
     def __init__(self, data):
         self.data = data
-        self.keys = ['tokens', 'segment_ids', 'is_random_next', 'masked_lm_positions',
-                     'masked_lm_labels']
+        self.keys = data_keys
 
     def __len__(self):
         return len(self.data)
@@ -30,8 +33,7 @@ class HFData(torch.utils.data.Dataset):
 
 
 def collate(batch):
-    keys = ['tokens', 'segment_ids', 'is_random_next', 'masked_lm_positions',
-            'masked_lm_labels']
+    keys = data_keys
     instances = {k: [] for k in keys}
     for b in batch:
         for k in keys:
@@ -46,8 +48,7 @@ def join_data(hf_data, batch_size):
     loader = torch.utils.data.DataLoader(data, batch_size=32, num_workers=16,
                                          drop_last=False, shuffle=False,
                                          collate_fn=collate)
-    keys = ['tokens', 'segment_ids', 'is_random_next', 'masked_lm_positions',
-            'masked_lm_labels']
+    keys = data_keys
     instances = {k: [] for k in keys}
     it = loader.__iter__()
     instances = {k: [] for k in keys}
@@ -69,33 +70,56 @@ def join_data(hf_data, batch_size):
     return instances
 
 
-def write_parquet(hf_data, batch_size, out_dir):
+def hf_to_parquet(hf_data, split_size, out_dir, batch_size, num_workers):
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
-    timer_1 = Timer()
-    timer_2 = Timer()
     data = HFData(hf_data)
-    loader = torch.utils.data.DataLoader(data, batch_size=32, num_workers=16,
+    split_to_parquet(data, out_dir, split_size, batch_size, num_workers)
+
+
+def split_to_parquet(data, out_dir, split_size, batch_size, num_workers):
+    timer = Timer()
+    loader = torch.utils.data.DataLoader(data, batch_size=batch_size, num_workers=num_workers,
                                          drop_last=False, shuffle=False,
                                          collate_fn=collate)
-    it = loader.__iter__()
-    with timer_1:
-        try:
-            j = 0
-            while True:
-                with timer_2:
-                    batch = it.__next__()
-                print(f"Batch time for {j}: {timer_2.time}")
-                with timer_2:
-                    pq.write_table(pa.table(batch), os.path.join(out_dir, f"data-{j:05}.pq"),
-                                   compression="NONE")
-                    with open(os.path.join(out_dir, f"data-{j:05}.meta"), "w") as fp:
-                        json.dump({"len": len(data)}, fp)
-                print(f"Write time for {j}: {timer_2.time}")
+    keys = data_keys
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+    with timer:
+        it = iter(loader)
+    print(f"Time for getting loader iterator {timer.time}")
+    len_loader = len(loader)
+    len_data = len(data)
+    prec = 1
+    while len_data := len_data // 10:
+        prec += 1
+    i = 0
+    j = 0
+    temp = {k: [] for k in keys}
+    with timer:
+        while True:
+            try:
+                batch = it.__next__()
                 j += 1
-        except StopIteration:
-            pass
-    print("Total time: {timer_1.time}")
+            except StopIteration:
+                break
+            for key in keys:
+                temp[key].extend(batch[key])
+            if len(temp[keys[0]]) >= split_size:
+                pq.write_table(pa.table({k: temp[k][:split_size] for k in keys}),
+                               os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
+                               compression="NONE")
+                for k in temp:
+                    temp[k] = temp[k][split_size:]
+                print(f"File number {i+1} written")
+                i += 1
+            if not j % 100:
+                print(f"{j} out of {len_loader} batches fetched")
+        pq.write_table(pa.table({k: temp[k] for k in keys}),
+                       os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
+                       compression="NONE")
+        print(f"File number {i+1} written")
+    print(f"Total time taken for prep: {timer.time}")
 
 
 def write_metadata(data_dir):
@@ -114,7 +138,7 @@ def write_metadata(data_dir):
 def dump_to_pq(data, out_dir, prec):
     """Dump Huggingface :code:`datasets` data to parquet files
 
-    The datasets is generated according to Nvidia implementation which makes one data instance
+    The datasets are generated according to Nvidia implementation which makes one data instance
     per document. That is used to generate masks while taking care that next sentence task
     doesn't use another document's sentence for that.
 
