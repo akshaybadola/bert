@@ -3,6 +3,7 @@ import glob
 import json
 import pickle
 
+import numpy as np
 import torch
 
 import pyarrow as pa
@@ -222,3 +223,40 @@ class ParquetData(torch.utils.data.Dataset):
         item_indx = i % self.split_size
         data_point = self._data_point(file_indx)
         return {k: data_point[k][item_indx].as_py() for k in self.keys}
+
+
+class MultiParquetData(torch.utils.data.Dataset):
+    """Muliplexed parquet files Dataset
+
+    Like ParquetData but with multiplexed datasets.
+
+    Return each item of dataset interleaved sequentially and proportionally.
+    E.g., if there are two datasets and one outnumbers the other by 5:1 then
+    5 items of first will be interleaved with 1 item of second
+
+    Args:
+        data_dirs: The dataset containing parquet files
+
+    """
+
+    def __init__(self, data_dirs):
+        self.dsets = {}
+        for data_dir in data_dirs:
+            self.dsets[data_dir] = ParquetData(data_dir)
+        self._lens = [len(x) for x in self.dsets.values()]
+        self._data_dirs = [*self.dsets.keys()]
+        self._create_indices()
+
+    def _create_indices(self):
+        lengths = self._lens
+        dtype = "int64"
+        inds_x = np.concatenate([np.ones(x, dtype=dtype)*i for i, x in enumerate(lengths)])
+        inds_y = np.concatenate([np.arange(x) for x in lengths])
+        self.inds = np.stack([inds_x, inds_y]).T
+
+    def __len__(self):
+        return sum(self._lens)
+
+    def __getitem__(self, i):
+        data_dir_indx, item_indx = self.inds[i]
+        return self.dsets[self._data_dirs[data_dir_indx]][item_indx]

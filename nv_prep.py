@@ -366,16 +366,6 @@ class Data(torch.utils.data.Dataset):
         return result
 
 
-def collate(batch):
-    keys = ['tokens', 'segment_ids', 'is_random_next', 'masked_lm_positions',
-            'masked_lm_labels']
-    instances = {k: [] for k in keys}
-    for b in batch:
-        for k in keys:
-            instances[k].extend(b[k])
-    return instances
-
-
 def prep_books(index, data, max_seq_length, short_seq_prob=0.1, masked_lm_prob=0.15,
                max_predictions_per_seq=20, loader_batch_size=16, split_size=32000,
                num_workers=16):
@@ -386,62 +376,6 @@ def prep_books(index, data, max_seq_length, short_seq_prob=0.1, masked_lm_prob=0
                 masked_lm_prob, max_predictions_per_seq, tokenizer)
     out_dir = f"bookcorpus-parquet-dupe-{max_seq_length}-{index:02}"
     parquet.split_to_parquet(dset, out_dir, split_size, loader_batch_size, num_workers)
-
-
-# def prep_books_(index, data, max_seq_length, short_seq_prob=0.1, masked_lm_prob=0.15,
-#                 max_predictions_per_seq=20, loader_batch_size=16, split_size=32000,
-#                 num_workers=16):
-#     tokenizer = BertTokenizerFast.from_pretrained("./bert-base-uncased-whole")
-#     if data is None:
-#         data = datasets.load_from_disk("bookcorpus-split-filtered")
-#     dset = Data(data, max_seq_length, short_seq_prob,
-#                 masked_lm_prob, max_predictions_per_seq, tokenizer)
-#     loader_kwargs = {"batch_size": loader_batch_size,
-#                      "num_workers": num_workers,
-#                      "drop_last": False,
-#                      "shuffle": False,
-#                      "collate_fn": parquet.collate}
-#     timer = Timer()
-#     loader = torch.utils.data.DataLoader(dset, **loader_kwargs)
-#     keys = TrainingInstance.keys()
-#     out_dir = f"bookcorpus-parquet-dupe-{max_seq_length}-{index:02}"
-#     if not os.path.exists(out_dir):
-#         os.mkdir(out_dir)
-#     with timer:
-#         it = iter(loader)
-#     print(f"Time for getting loader iterator {timer.time}")
-#     len_loader = len(loader)
-#     len_data = len(data)
-#     prec = 1
-#     while len_data := len_data // 10:
-#         prec += 1
-#     i = 0
-#     j = 0
-#     temp = {k: [] for k in keys}
-#     with timer:
-#         while True:
-#             try:
-#                 batch = it.__next__()
-#                 j += 1
-#             except StopIteration:
-#                 break
-#             for key in keys:
-#                 temp[key].extend(batch[key])
-#             if len(temp[keys[0]]) >= split_size:
-#                 pq.write_table(pa.table({k: temp[k][:split_size] for k in keys}),
-#                                os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
-#                                compression="NONE")
-#                 for k in temp:
-#                     temp[k] = temp[k][split_size:]
-#                 print(f"File number {i+1} written")
-#                 i += 1
-#             if not j % 100:
-#                 print(f"{j} out of {len_loader} batches fetched")
-#         pq.write_table(pa.table({k: temp[k] for k in keys}),
-#                        os.path.join(out_dir, f"data-{i:0{prec}}.pq"),
-#                        compression="NONE")
-#         print(f"File number {i+1} written")
-#     print(f"Total time taken for prep: {timer.time}")
 
 
 if __name__ == "__main__":
