@@ -319,7 +319,7 @@ class NVPrep:
         # document = self.documents.data["tokens"][document_index]
         instances = self.process_document_subr(document, document_index)
         return instances
-    
+
     def create_instances_from_document_books(self, example, document_index):
         document = self.documents[document_index]["text"]
         # document = self.documents.data["tokens"][document_index]

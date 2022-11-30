@@ -42,36 +42,22 @@ def collate(batch):
     return instances
 
 
-def join_data(hf_data, batch_size):
-    timer_1 = Timer()
-    timer_2 = Timer()
-    data = HFData(hf_data)
-    loader = torch.utils.data.DataLoader(data, batch_size=32, num_workers=16,
-                                         drop_last=False, shuffle=False,
-                                         collate_fn=collate)
-    keys = data_keys
-    instances = {k: [] for k in keys}
-    it = loader.__iter__()
-    instances = {k: [] for k in keys}
-    with timer_1:
-        try:
-            j = 0
-            while True:
-                with timer_2:
-                    batch = it.__next__()
-                print(f"Batch time for {j}: {timer_2.time}")
-                with timer_2:
-                    for k in keys:
-                        instances[k].extend(batch[k])
-                print(f"Join time for {j}: {timer_2.time}")
-                j += 1
-        except StopIteration:
-            pass
-    print("Total time: {timer_1.time}")
-    return instances
-
-
 def hf_to_parquet(hf_data, split_size, out_dir, batch_size, num_workers):
+    """Split a huggingface datasets.Dataset to small parquet files
+
+    HF dataset eats up a lot of space for some reason and loads slowly. Parquet
+    files are faster and simpler but less streamlined for publishing and
+    serialization.
+
+    Args:
+        hf_data: Huggingface dataset
+        split_size: Number of data points per file
+        out_dir: Output directory of parquet files
+        batch_size: Batch size for dataloader
+        num_workers: Number of proceses to use by dataloader
+
+    """
+
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
     data = HFData(hf_data)
@@ -79,6 +65,19 @@ def hf_to_parquet(hf_data, split_size, out_dir, batch_size, num_workers):
 
 
 def split_to_parquet(data, out_dir, split_size, batch_size, num_workers):
+    """Split a Dataset to multiple parquet files
+
+    The function is opaque to kind of dataset and only it has to be a torch
+    Dataset, which can be batched with a torch DataLoader
+
+    Args:
+        data: The dataset
+        out_dir: Output directory of parquet files
+        split_size: Number of data points per file
+        batch_size: Batch size for dataloader
+        num_workers: Number of proceses to use by dataloader
+
+    """
     timer = Timer()
     loader = torch.utils.data.DataLoader(data, batch_size=batch_size, num_workers=num_workers,
                                          drop_last=False, shuffle=False,
